@@ -8,11 +8,9 @@ import streamlit as st
 # ==========================================
 st.set_page_config(page_title="Crypto Dashboard Pro", layout="wide")
 
-# Bezpieczne pobranie hasła ze Streamlit Secrets lub użycie domyślnego
 HASLO = st.secrets.get("PASSWORD", "Krypto2026!")
 
 def check_password():
-    """Weryfikacja hasła dostępu."""
     def password_entered():
         if st.session_state.get("password_input") == HASLO:
             st.session_state["password_correct"] = True
@@ -37,9 +35,8 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# GŁÓWNA LOGIKA DANYCH (TA + ML + DVOL)
+# LOGIKA DANYCH (TA + HYBRYDA RSI/ML)
 # ==========================================
-
 TOKENS = [
     {'symbol': 'BTC', 'coinbase': 'BTC-USD', 'gecko_id': 'bitcoin'},
     {'symbol': 'ETH', 'coinbase': 'ETH-USD', 'gecko_id': 'ethereum'},
@@ -138,13 +135,11 @@ def fetch_technical_analysis():
             prev_price = df['close'].iloc[0] if len(df) < 24 else df['close'].iloc[-24]
             change_24h = ((price - prev_price) / prev_price) * 100
             
-            # RSI
             delta = df['close'].diff()
             gain = delta.clip(lower=0).rolling(14).mean()
             loss = (-delta.clip(upper=0)).rolling(14).mean()
             rsi = 100 - (100 / (1 + (gain.iloc[-1] / (loss.iloc[-1] + 1e-9))))
             
-            # ATR
             tr = pd.concat([
                 df['high'] - df['low'],
                 (df['high'] - df['close'].shift()).abs(),
@@ -152,22 +147,18 @@ def fetch_technical_analysis():
             ], axis=1).max(axis=1)
             atr = tr.rolling(min(14, len(df))).mean().iloc[-1]
             
-            # EMA 200
             span_period = min(200, len(df))
             ema200 = df['close'].ewm(span=span_period, adjust=False).mean().iloc[-1]
 
-            # Bollinger Bands %B
             sma20 = df['close'].rolling(min(20, len(df))).mean().iloc[-1]
             std20 = df['close'].rolling(min(20, len(df))).std().iloc[-1]
             upper_bb = sma20 + (std20 * 2)
             lower_bb = sma20 - (std20 * 2)
             pct_b = (price - lower_bb) / (upper_bb - lower_bb + 1e-9)
 
-            # Volume Surge
             vol_ma = df['volume'].rolling(min(20, len(df))).mean().iloc[-1]
             vol_surge = (df['volume'].iloc[-1] / vol_ma) if vol_ma > 0 else 1.0
 
-            # Funding Rate
             funding = get_binance_funding(item['symbol'])
 
             sl = price - (2 * atr)
@@ -179,7 +170,8 @@ def fetch_technical_analysis():
             rr_val = round(reward / risk, 1) if risk > 0 and reward > 0 else 0.1
             rr_str = f"1:{rr_val}"
             
-            rsi_score = (30 - rsi) * 0.9 + 5.0 if rsi < 30 else (-(rsi - 70) * 0.8 if rsi > 70 else (rsi - 50) * 0.2)
+            # Dostrojony progo RSI do 35 (Opcja 3)
+            rsi_score = (35 - rsi) * 0.9 + 5.0 if rsi < 35 else (-(rsi - 70) * 0.8 if rsi > 70 else (rsi - 50) * 0.2)
             support_score = max(0.0, (3.0 - (((price - support) / price) * 100)) * 2.5)
             fng_score = (50 - fng_val) * 0.2
             ema_score = 5.0 if price > ema200 else -5.0
@@ -207,7 +199,8 @@ def fetch_technical_analysis():
                 "Opór": fmt(resistance),
                 "R:R": rr_str,
                 "Szansa (%)": f"{chance}%",
-                "Atrakcyjność (%)": okazja_str
+                "Atrakcyjność (%)": okazja_str,
+                "RawScore": okazja_score
             })
         except Exception:
             continue
@@ -215,18 +208,12 @@ def fetch_technical_analysis():
     return pd.DataFrame(data), fng_val, fng_class
 
 def run_predictions(df_ta, fng_val):
-    if df_ta.empty or "Komunikat" in df_ta.columns:
+    if df_ta.empty or "RawScore" not in df_ta.columns:
         return pd.DataFrame({"Komunikat": ["Brak danych do prognozy."]})
 
     dvol_btc = get_deribit_dvol("BTC")
-
     btc_row = df_ta[df_ta["Token"] == "BTC"]
-    if not btc_row.empty:
-        btc_price = float(btc_row["Cena ($)"].values[0])
-        btc_atr = float(btc_row["ATR"].values[0])
-        btc_vol_ratio = (btc_atr / btc_price) if btc_price > 0 else 0.01
-    else:
-        btc_vol_ratio = 0.01
+    btc_vol_ratio = (float(btc_row["ATR"].values[0]) / float(btc_row["Cena ($)"].values[0])) if not btc_row.empty else 0.01
 
     def analyze_row(row):
         price = float(row["Cena ($)"])
@@ -236,45 +223,39 @@ def run_predictions(df_ta, fng_val):
         pct_b = float(row["%B (BB)"])
         funding = float(str(row["Funding (%)"]).replace('%', ''))
 
-        rsi_bounce = (30 - rsi) * 0.0030 if rsi < 30 else (-(rsi - 70) * 0.0020 if rsi > 70 else 0)
+        # Bonus od RSI < 35 (Opcja 3)
+        rsi_bounce = (35 - rsi) * 0.0025 if rsi < 35 else (-(rsi - 70) * 0.0020 if rsi > 70 else 0)
         bb_bounce = (0.1 - pct_b) * 0.005 if pct_b < 0.1 else (-(pct_b - 0.9) * 0.005 if pct_b > 0.9 else 0)
         funding_penalty = -0.003 if funding > 0.03 else (0.003 if funding < -0.01 else 0)
 
         expected_change = (change / 100 * 0.05) + rsi_bounce + bb_bounce + funding_penalty
         target_price = price * (1 + expected_change)
 
-        hourly_drift = expected_change / 24.0
-        hourly_vol = (atr / price) / np.sqrt(24) if price > 0 else 0.01
+        shocks = np.random.normal(expected_change / 24.0, (atr / price) / np.sqrt(24), (10000, 24))
+        final_prices = price * np.exp(np.cumsum(shocks, axis=1))[:, -1]
 
-        shocks = np.random.normal(hourly_drift, hourly_vol, (10000, 24))
-        paths = price * np.exp(np.cumsum(shocks, axis=1))
-        final_prices = paths[:, -1]
-
-        mc_low = np.percentile(final_prices, 2.5)
-        mc_high = np.percentile(final_prices, 97.5)
         prob = np.mean(final_prices > price) * 100
-
-        token_vol_ratio = (atr / price) if price > 0 else 0.01
-        token_iv = dvol_btc * (token_vol_ratio / btc_vol_ratio)
+        token_iv = dvol_btc * ((atr / price) / btc_vol_ratio)
         sigma_24h = (token_iv / 100.0) / np.sqrt(365)
 
-        dvol_low = price * (1.0 - 1.96 * sigma_24h)
-        dvol_high = price * (1.0 + 1.96 * sigma_24h)
-
+        # Nowa logika sygnału: ochrona przed błędną sprzedażą w wyprzedaniu
         if expected_change > 0:
-            if prob >= 58.0 or rsi < 25 or fng_val < 25:
+            if prob >= 55.0 or rsi < 30 or fng_val < 25:
                 signal = "🟢 KUP (Mocny)"
-            elif prob >= 51.0:
+            elif prob >= 50.0:
                 signal = "📈 KUP (Słaby)"
             else:
                 signal = "⏳ CZEKAJ / NEUTRALNY"
         else:
-            signal = "🔴 SPRZEDAJ" if (prob < 42.0 or funding > 0.05) else "⏳ CZEKAJ / NEUTRALNY"
+            if rsi <= 45:
+                signal = "⏳ CZEKAJ / NEUTRALNY"
+            else:
+                signal = "🔴 SPRZEDAJ" if (prob < 42.0 or funding > 0.05) else "⏳ CZEKAJ / NEUTRALNY"
 
         return pd.Series([
             f"${fmt(target_price)}",
-            f"${fmt(mc_low)} - ${fmt(mc_high)}",
-            f"${fmt(dvol_low)} - ${fmt(dvol_high)}",
+            f"${fmt(np.percentile(final_prices, 2.5))} - ${fmt(np.percentile(final_prices, 97.5))}",
+            f"${fmt(price * (1.0 - 1.96 * sigma_24h))} - ${fmt(price * (1.0 + 1.96 * sigma_24h))}",
             f"{round(token_iv, 1)}%",
             f"{round(prob, 1)}%",
             signal
@@ -285,8 +266,10 @@ def run_predictions(df_ta, fng_val):
     
     return df_ml[["Token", "Cena ($)", "Prognoza ML (24h)", "Zasięg Monte Carlo (95%)", "Zasięg Opcji DVOL (95%)", "Implikowana Zmienność (IV)", "Prawdopodobieństwo", "Sygnał Hybrydowy"]]
 
+# ==========================================
+# GŁÓWNY INTERFEJS UŻYTKOWNIKA
+# ==========================================
 df_ta, fng_val, fng_class = fetch_technical_analysis()
-df_ml = run_predictions(df_ta, fng_val)
 
 col_title, col_fng = st.columns([3, 1])
 with col_title:
@@ -294,13 +277,23 @@ with col_title:
 with col_fng:
     st.metric(label="Fear & Greed Index", value=f"{fng_val}/100", delta=fng_class)
 
+if not df_ta.empty and "RawScore" in df_ta.columns:
+    top_deals = df_ta[df_ta["RawScore"] >= 70.0]
+    if not top_deals.empty:
+        st.success(f"🔥 **WYKRYTO MOCNE OKAZJE:** Tokeny {', '.join(top_deals['Token'].tolist())} osiągnęły wysoki poziom atrakcyjności!")
+    else:
+        st.info("ℹ️ Brak w tej chwili wygenerowanych sygnałów o wysokim priorytecie (≥70%).")
+
 if st.button("🔄 Odśwież dane", type="primary"):
     st.cache_data.clear()
+
+df_ml = run_predictions(df_ta, fng_val)
+df_ta_clean = df_ta.drop(columns=["RawScore"], errors="ignore")
 
 tab1, tab2 = st.tabs(["1. Pełna Analiza Techniczna", "2. Prognozy ML, Monte Carlo & Opcje DVOL"])
 
 with tab1:
-    st.dataframe(df_ta, use_container_width=True)
+    st.dataframe(df_ta_clean, use_container_width=True)
 
 with tab2:
     st.dataframe(df_ml, use_container_width=True)
