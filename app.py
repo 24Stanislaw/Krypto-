@@ -84,8 +84,8 @@ def get_binance_funding(symbol):
         pass
     return 0.01
 
-def fetch_from_coinbase(symbol_pair):
-    url = f"https://api.exchange.coinbase.com/products/{symbol_pair}/candles?granularity=3600"
+def fetch_from_coinbase(symbol_pair, granularity=3600):
+    url = f"https://api.exchange.coinbase.com/products/{symbol_pair}/candles?granularity={granularity}"
     headers = {"User-Agent": "CryptoDashboard/1.0"}
     res = requests.get(url, headers=headers, timeout=4)
     res.raise_for_status()
@@ -104,10 +104,22 @@ def fetch_from_coingecko(gecko_id):
 def get_candles(token_info):
     if token_info['coinbase']:
         try:
-            return fetch_from_coinbase(token_info['coinbase'])
+            return fetch_from_coinbase(token_info['coinbase'], granularity=3600)
         except Exception:
             pass
     return fetch_from_coingecko(token_info['gecko_id'])
+
+def get_btc_daily_macro_ema200():
+    try:
+        df_d1 = fetch_from_coinbase("BTC-USD", granularity=86400)
+        if len(df_d1) >= 20:
+            span_period = min(200, len(df_d1))
+            ema200_d1 = df_d1['close'].ewm(span=span_period, adjust=False).mean().iloc[-1]
+            last_price = df_d1['close'].iloc[-1]
+            return last_price, ema200_d1
+    except Exception:
+        pass
+    return None, None
 
 def get_deribit_dvol(currency="BTC"):
     try:
@@ -124,6 +136,7 @@ def get_deribit_dvol(currency="BTC"):
 def fetch_technical_analysis():
     data = []
     fng_val, fng_class = get_fear_and_greed()
+    btc_d1_price, btc_d1_ema200 = get_btc_daily_macro_ema200()
 
     for item in TOKENS:
         try:
@@ -170,7 +183,6 @@ def fetch_technical_analysis():
             rr_val = round(reward / risk, 1) if risk > 0 and reward > 0 else 0.1
             rr_str = f"1:{rr_val}"
             
-            # Dynamiczny progo RSI oparty o ATR
             atr_pct = (atr / price) * 100
             dynamic_rsi_thresh = 30.0 + min(max(atr_pct * 1.5, 0.0), 10.0)
             
@@ -206,12 +218,14 @@ def fetch_technical_analysis():
                 "Atrakcyjność (%)": okazja_str,
                 "RawScore": okazja_score,
                 "Price_Raw": price,
-                "EMA200_Raw": ema200
+                "EMA200_Raw": ema200,
+                "BTC_D1_Price": btc_d1_price,
+                "BTC_D1_EMA200": btc_d1_ema200
             })
         except Exception:
             continue
             
-    return pd.DataFrame(data), fng_val, fng_class
+    return pd.DataFrame(data), fng_val, fng_class, btc_d1_price, btc_d1_ema200
 
 def run_predictions(df_ta, fng_val):
     if df_ta.empty or "RawScore" not in df_ta.columns:
@@ -220,14 +234,16 @@ def run_predictions(df_ta, fng_val):
     dvol_btc = get_deribit_dvol("BTC")
     btc_row = df_ta[df_ta["Token"] == "BTC"]
     
-    # Makro Filtr BTC: Sprawdzenie trendu Bitcoina
-    btc_bullish = True
+    btc_bullish_macro = True
     btc_vol_ratio = 0.01
+    
+    if not df_ta.empty and "BTC_D1_Price" in df_ta.columns and df_ta["BTC_D1_Price"].iloc[0] is not None:
+        b_price = float(df_ta["BTC_D1_Price"].iloc[0])
+        b_ema_d1 = float(df_ta["BTC_D1_EMA200"].iloc[0])
+        btc_bullish_macro = b_price >= (b_ema_d1 * 0.985)
+
     if not btc_row.empty:
-        btc_price = float(btc_row["Price_Raw"].values[0])
-        btc_ema = float(btc_row["EMA200_Raw"].values[0])
-        btc_bullish = btc_price >= btc_ema
-        btc_vol_ratio = (float(btc_row["ATR"].values[0]) / btc_price)
+        btc_vol_ratio = (float(btc_row["ATR"].values[0]) / float(btc_row["Price_Raw"].values[0]))
 
     def analyze_row(row):
         symbol = row["Token"]
@@ -256,14 +272,12 @@ def run_predictions(df_ta, fng_val):
         token_iv = dvol_btc * ((atr / price) / btc_vol_ratio)
         sigma_24h = (token_iv / 100.0) / np.sqrt(365)
 
-        # Logika sygnału z filtrami Makro BTC i Wolumenu
         if expected_change > 0:
             if prob >= 55.0 or rsi < 30 or fng_val < 25:
-                # Filtr wolumenowy i trendu BTC dla altcoinów
-                if symbol != "BTC" and not btc_bullish:
-                    signal = "📈 KUP (Słaby)" # Zdegradowany sygnał z powodu niedźwiedziego BTC
+                if symbol != "BTC" and not btc_bullish_macro:
+                    signal = "📈 KUP (Słaby)"
                 elif vol_surge < 1.0 and symbol != "BTC":
-                    signal = "📈 KUP (Słaby)" # Brak potwierdzenia wolumenem
+                    signal = "📈 KUP (Słaby)"
                 else:
                     signal = "🟢 KUP (Mocny)"
             elif prob >= 50.0:
@@ -293,11 +307,20 @@ def run_predictions(df_ta, fng_val):
 # ==========================================
 # GŁÓWNY INTERFEJS UŻYTKOWNIKA
 # ==========================================
-df_ta, fng_val, fng_class = fetch_technical_analysis()
+df_ta, fng_val, fng_class, btc_d1_price, btc_d1_ema200 = fetch_technical_analysis()
 
-col_title, col_fng = st.columns([3, 1])
+col_title, col_btc_macro, col_fng = st.columns([2.5, 1.2, 1])
 with col_title:
     st.title("📊 Zintegrowany Panel Analityczny Crypto Pro")
+
+with col_btc_macro:
+    if btc_d1_price and btc_d1_ema200:
+        is_bullish = btc_d1_price >= (btc_d1_ema200 * 0.985)
+        status_label = "🟢 Wzrostowy (Byczy)" if is_bullish else "🔴 Spadkowy (Niedźwiedzi)"
+        st.metric(label="BTC Trend D1 (EMA 200)", value=status_label, delta=f"Cena: ${fmt(btc_d1_price)}")
+    else:
+        st.metric(label="BTC Trend D1", value="Brak danych")
+
 with col_fng:
     st.metric(label="Fear & Greed Index", value=f"{fng_val}/100", delta=fng_class)
 
@@ -312,7 +335,7 @@ if st.button("🔄 Odśwież dane", type="primary"):
     st.cache_data.clear()
 
 df_ml = run_predictions(df_ta, fng_val)
-df_ta_clean = df_ta.drop(columns=["RawScore", "Vol_Surge_Raw", "Price_Raw", "EMA200_Raw"], errors="ignore")
+df_ta_clean = df_ta.drop(columns=["RawScore", "Vol_Surge_Raw", "Price_Raw", "EMA200_Raw", "BTC_D1_Price", "BTC_D1_EMA200"], errors="ignore")
 
 tab1, tab2 = st.tabs(["1. Pełna Analiza Techniczna", "2. Prognozy ML, Monte Carlo & Opcje DVOL"])
 
