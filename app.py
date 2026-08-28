@@ -170,8 +170,11 @@ def fetch_technical_analysis():
             rr_val = round(reward / risk, 1) if risk > 0 and reward > 0 else 0.1
             rr_str = f"1:{rr_val}"
             
-            # Dostrojony progo RSI do 35 (Opcja 3)
-            rsi_score = (35 - rsi) * 0.9 + 5.0 if rsi < 35 else (-(rsi - 70) * 0.8 if rsi > 70 else (rsi - 50) * 0.2)
+            # Dynamiczny progo RSI oparty o ATR
+            atr_pct = (atr / price) * 100
+            dynamic_rsi_thresh = 30.0 + min(max(atr_pct * 1.5, 0.0), 10.0)
+            
+            rsi_score = (dynamic_rsi_thresh - rsi) * 0.9 + 5.0 if rsi < dynamic_rsi_thresh else (-(rsi - 70) * 0.8 if rsi > 70 else (rsi - 50) * 0.2)
             support_score = max(0.0, (3.0 - (((price - support) / price) * 100)) * 2.5)
             fng_score = (50 - fng_val) * 0.2
             ema_score = 5.0 if price > ema200 else -5.0
@@ -192,6 +195,7 @@ def fetch_technical_analysis():
                 "%B (BB)": round(pct_b, 2),
                 "EMA 200": fmt(ema200),
                 "Wolumen (x)": f"{round(vol_surge, 1)}x",
+                "Vol_Surge_Raw": vol_surge,
                 "Funding (%)": f"{round(funding, 4)}%",
                 "ATR": fmt(atr),
                 "SL (ATR)": fmt(sl),
@@ -200,7 +204,9 @@ def fetch_technical_analysis():
                 "R:R": rr_str,
                 "Szansa (%)": f"{chance}%",
                 "Atrakcyjność (%)": okazja_str,
-                "RawScore": okazja_score
+                "RawScore": okazja_score,
+                "Price_Raw": price,
+                "EMA200_Raw": ema200
             })
         except Exception:
             continue
@@ -213,18 +219,30 @@ def run_predictions(df_ta, fng_val):
 
     dvol_btc = get_deribit_dvol("BTC")
     btc_row = df_ta[df_ta["Token"] == "BTC"]
-    btc_vol_ratio = (float(btc_row["ATR"].values[0]) / float(btc_row["Cena ($)"].values[0])) if not btc_row.empty else 0.01
+    
+    # Makro Filtr BTC: Sprawdzenie trendu Bitcoina
+    btc_bullish = True
+    btc_vol_ratio = 0.01
+    if not btc_row.empty:
+        btc_price = float(btc_row["Price_Raw"].values[0])
+        btc_ema = float(btc_row["EMA200_Raw"].values[0])
+        btc_bullish = btc_price >= btc_ema
+        btc_vol_ratio = (float(btc_row["ATR"].values[0]) / btc_price)
 
     def analyze_row(row):
-        price = float(row["Cena ($)"])
+        symbol = row["Token"]
+        price = float(row["Price_Raw"])
         atr = float(row["ATR"])
         rsi = float(row["RSI"])
         change = float(row["24h (%)"])
         pct_b = float(row["%B (BB)"])
+        vol_surge = float(row["Vol_Surge_Raw"])
         funding = float(str(row["Funding (%)"]).replace('%', ''))
 
-        # Bonus od RSI < 35 (Opcja 3)
-        rsi_bounce = (35 - rsi) * 0.0025 if rsi < 35 else (-(rsi - 70) * 0.0020 if rsi > 70 else 0)
+        atr_pct = (atr / price) * 100
+        dynamic_rsi_thresh = 30.0 + min(max(atr_pct * 1.5, 0.0), 10.0)
+
+        rsi_bounce = (dynamic_rsi_thresh - rsi) * 0.0025 if rsi < dynamic_rsi_thresh else (-(rsi - 70) * 0.0020 if rsi > 70 else 0)
         bb_bounce = (0.1 - pct_b) * 0.005 if pct_b < 0.1 else (-(pct_b - 0.9) * 0.005 if pct_b > 0.9 else 0)
         funding_penalty = -0.003 if funding > 0.03 else (0.003 if funding < -0.01 else 0)
 
@@ -238,10 +256,16 @@ def run_predictions(df_ta, fng_val):
         token_iv = dvol_btc * ((atr / price) / btc_vol_ratio)
         sigma_24h = (token_iv / 100.0) / np.sqrt(365)
 
-        # Nowa logika sygnału: ochrona przed błędną sprzedażą w wyprzedaniu
+        # Logika sygnału z filtrami Makro BTC i Wolumenu
         if expected_change > 0:
             if prob >= 55.0 or rsi < 30 or fng_val < 25:
-                signal = "🟢 KUP (Mocny)"
+                # Filtr wolumenowy i trendu BTC dla altcoinów
+                if symbol != "BTC" and not btc_bullish:
+                    signal = "📈 KUP (Słaby)" # Zdegradowany sygnał z powodu niedźwiedziego BTC
+                elif vol_surge < 1.0 and symbol != "BTC":
+                    signal = "📈 KUP (Słaby)" # Brak potwierdzenia wolumenem
+                else:
+                    signal = "🟢 KUP (Mocny)"
             elif prob >= 50.0:
                 signal = "📈 KUP (Słaby)"
             else:
@@ -288,7 +312,7 @@ if st.button("🔄 Odśwież dane", type="primary"):
     st.cache_data.clear()
 
 df_ml = run_predictions(df_ta, fng_val)
-df_ta_clean = df_ta.drop(columns=["RawScore"], errors="ignore")
+df_ta_clean = df_ta.drop(columns=["RawScore", "Vol_Surge_Raw", "Price_Raw", "EMA200_Raw"], errors="ignore")
 
 tab1, tab2 = st.tabs(["1. Pełna Analiza Techniczna", "2. Prognozy ML, Monte Carlo & Opcje DVOL"])
 
