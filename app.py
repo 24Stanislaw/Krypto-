@@ -135,6 +135,8 @@ def get_deribit_dvol(currency="BTC"):
 @st.cache_data(ttl=60)
 def fetch_technical_analysis():
     data = []
+    loaded_count = 0
+    total_count = len(TOKENS)
     fng_val, fng_class = get_fear_and_greed()
     btc_d1_price, btc_d1_ema200 = get_btc_daily_macro_ema200()
 
@@ -222,10 +224,11 @@ def fetch_technical_analysis():
                 "BTC_D1_Price": btc_d1_price,
                 "BTC_D1_EMA200": btc_d1_ema200
             })
+            loaded_count += 1
         except Exception:
             continue
             
-    return pd.DataFrame(data), fng_val, fng_class, btc_d1_price, btc_d1_ema200
+    return pd.DataFrame(data), fng_val, fng_class, btc_d1_price, btc_d1_ema200, loaded_count, total_count
 
 def run_predictions(df_ta, fng_val):
     if df_ta.empty or "RawScore" not in df_ta.columns:
@@ -307,11 +310,12 @@ def run_predictions(df_ta, fng_val):
 # ==========================================
 # GŁÓWNY INTERFEJS UŻYTKOWNIKA
 # ==========================================
-df_ta, fng_val, fng_class, btc_d1_price, btc_d1_ema200 = fetch_technical_analysis()
+df_ta, fng_val, fng_class, btc_d1_price, btc_d1_ema200, loaded_count, total_count = fetch_technical_analysis()
 
 col_title, col_btc_macro, col_fng = st.columns([2.5, 1.2, 1])
 with col_title:
     st.title("📊 Zintegrowany Panel Analityczny Crypto Pro")
+    st.caption(f"ℹ️ Status API: Pomyślnie załadowano dane dla **{loaded_count}/{total_count}** tokenów.")
 
 with col_btc_macro:
     if btc_d1_price and btc_d1_ema200:
@@ -323,6 +327,18 @@ with col_btc_macro:
 
 with col_fng:
     st.metric(label="Fear & Greed Index", value=f"{fng_val}/100", delta=fng_class)
+
+# Dynamiczne wskazówki behawioralne oparte o FNG
+if fng_val < 25:
+    st.info("💡 **Wskazówka behawioralna (Ekstremalny strach):** Historycznie to najlepsze momenty na akumulację i zakupy DCA.")
+elif fng_val > 75:
+    st.warning("⚠️ **Wskazówka behawioralna (Ekstremalna chciwość):** Rynek rozgrzany – zachowaj szczególną ostrożność i rozważ realizację zysków.")
+
+# Kontrola Funding Rate (Ostrzeżenie o przelewarowaniu)
+if not df_ta.empty and "Funding (%)" in df_ta.columns:
+    avg_funding = df_ta['Funding (%)'].apply(lambda x: float(str(x).replace('%', ''))).mean()
+    if avg_funding > 0.03:
+        st.warning(f"⚠️ **Ostrzeżenie o przelewarowaniu:** Średni Funding Rate wynosi {round(avg_funding, 4)}%. Wysokie ryzyko nagłych korekt (Long Squeeze).")
 
 if not df_ta.empty and "RawScore" in df_ta.columns:
     top_deals = df_ta[df_ta["RawScore"] >= 70.0]
@@ -337,10 +353,58 @@ if st.button("🔄 Odśwież dane", type="primary"):
 df_ml = run_predictions(df_ta, fng_val)
 df_ta_clean = df_ta.drop(columns=["RawScore", "Vol_Surge_Raw", "Price_Raw", "EMA200_Raw", "BTC_D1_Price", "BTC_D1_EMA200"], errors="ignore")
 
-tab1, tab2 = st.tabs(["1. Pełna Analiza Techniczna", "2. Prognozy ML, Monte Carlo & Opcje DVOL"])
+tab1, tab2 = st.tabs(["1. Pełna Analiza Techniczna", "2. Prognoza Hybrydowa ML & Monte Carlo"])
 
 with tab1:
     st.dataframe(df_ta_clean, use_container_width=True)
 
 with tab2:
     st.dataframe(df_ml, use_container_width=True)
+
+# ==========================================
+# AUTOMATYCZNE PODSUMOWANIE I INTERPRETACJA
+# ==========================================
+st.divider()
+st.subheader("💡 Podsumowanie i Interpretacja Wyników")
+
+if not df_ml.empty and "Sygnał Hybrydowy" in df_ml.columns:
+    strong_buys = df_ml[df_ml["Sygnał Hybrydowy"] == "🟢 KUP (Mocny)"]["Token"].tolist()
+    weak_buys = df_ml[df_ml["Sygnał Hybrydowy"] == "📈 KUP (Słaby)"]["Token"].tolist()
+    sells = df_ml[df_ml["Sygnał Hybrydowy"] == "🔴 SPRZEDAJ"]["Token"].tolist()
+
+    col_sum1, col_sum2, col_sum3 = st.columns(3)
+
+    with col_sum1:
+        st.markdown("### 🟢 Najsilniejsze Okazje")
+        if strong_buys:
+            st.success(f"**Tokeny:** {', '.join(strong_buys)}\n\n"
+                       "**Interpretacja:** Aktywa te posiadają potrójne potwierdzenie: wysokie prawdopodobieństwo wzrostu, podwyższony wolumen oraz sprzyjające otoczenie makro Bitcoina.")
+        else:
+            st.info("Brak tokenów kwalifikujących się do pełnego sygnału akumulacji.")
+
+    with col_sum2:
+        st.markdown("### 📈 Akumulacja Ostrożna")
+        if weak_buys:
+            st.warning(f"**Tokeny:** {', '.join(weak_buys)}\n\n"
+                       "**Interpretacja:** Sygnał wzrostowy z zastrzeżeniem. Może to wynikać ze słabszego wolumenu lub ograniczenia narzuconego przez trend makro BTC.")
+        else:
+            st.info("Brak tokenów w strefie umiarkowanego zakupu.")
+
+    with col_sum3:
+        st.markdown("### 🔴 Ryzyko / Wyprzedaż")
+        if sells:
+            st.error(f"**Tokeny:** {', '.join(sells)}\n\n"
+                     "**Interpretacja:** Wysokie ryzyko spadku cen lub przegrzane wskaźniki (np. wysoki Funding Rate). Zalecana realizacja zysków lub ucieczka do kapitału.")
+        else:
+            st.success("Brak tokenów z aktywnym sygnałem wyprzedaży.")
+
+    st.markdown("---")
+    st.markdown("### 🔍 Kluczowe Wnioski Rynkowe")
+    
+    btc_macro_text = "Byczy (sprzyja altcoinom)" if btc_d1_price and btc_d1_ema200 and btc_d1_price >= (btc_d1_ema200 * 0.985) else "Niedźwiedzi (ostrożność na altcoinach)"
+    
+    st.markdown(f"""
+    * **Sentyment ogólny:** Fear & Greed Index wynosi **{fng_val}/100 ({fng_class})**. 
+    * **Filtr Trendu BTC:** Trend dzienny Bitcoina oceniono jako **{btc_macro_text}**.
+    * **Rekomendacja:** W przypadku sygnałów *KUP (Słaby)* warto rozważyć wchodzenie w pozycje metodą DCA (podział kapitału na części), natomiast dla sygnałów *KUP (Mocny)* można rozważyć wejście przy obecnych wsparciach z ustawionym zleceniem Stop-Loss.
+    """)
