@@ -1,8 +1,44 @@
-import time
 import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
+
+# ==========================================
+# KONFIGURACJA STRONY I LOGOWANIE
+# ==========================================
+st.set_page_config(page_title="Crypto Dashboard Pro", layout="wide")
+
+# Bezpieczne pobranie hasła ze Streamlit Secrets lub użycie domyślnego
+HASLO = st.secrets.get("PASSWORD", "Krypto2026!")
+
+def check_password():
+    """Weryfikacja hasła dostępu."""
+    def password_entered():
+        if st.session_state.get("password_input") == HASLO:
+            st.session_state["password_correct"] = True
+            if "password_input" in st.session_state:
+                del st.session_state["password_input"]
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        st.title("🔒 Dostęp Zastrzeżony")
+        st.text_input("Podaj hasło dostępu, aby otworzyć panel:", type="password", on_change=password_entered, key="password_input")
+        return False
+    elif not st.session_state["password_correct"]:
+        st.title("🔒 Dostęp Zastrzeżony")
+        st.text_input("Podaj hasło dostępu, aby otworzyć panel:", type="password", on_change=password_entered, key="password_input")
+        st.error("⛔ Niepoprawne hasło! Spróbuj ponownie.")
+        return False
+    else:
+        return True
+
+if not check_password():
+    st.stop()
+
+# ==========================================
+# GŁÓWNA LOGIKA DANYCH (TA + ML + DVOL)
+# ==========================================
 
 TOKENS = [
     {'symbol': 'BTC', 'coinbase': 'BTC-USD', 'gecko_id': 'bitcoin'},
@@ -31,6 +67,25 @@ def fmt(val):
         else:
             return round(val, 2)
     return val
+
+def get_fear_and_greed():
+    try:
+        res = requests.get("https://api.alternative.me/fng/", timeout=4).json()
+        val = int(res['data'][0]['value'])
+        classification = res['data'][0]['value_classification']
+        return val, classification
+    except Exception:
+        return 50, "Neutral"
+
+def get_binance_funding(symbol):
+    try:
+        url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}USDT"
+        res = requests.get(url, timeout=3).json()
+        if 'lastFundingRate' in res:
+            return float(res['lastFundingRate']) * 100
+    except Exception:
+        pass
+    return 0.01
 
 def fetch_from_coinbase(symbol_pair):
     url = f"https://api.exchange.coinbase.com/products/{symbol_pair}/candles?granularity=3600"
@@ -71,6 +126,8 @@ def get_deribit_dvol(currency="BTC"):
 @st.cache_data(ttl=60)
 def fetch_technical_analysis():
     data = []
+    fng_val, fng_class = get_fear_and_greed()
+
     for item in TOKENS:
         try:
             df = get_candles(item)
@@ -81,11 +138,13 @@ def fetch_technical_analysis():
             prev_price = df['close'].iloc[0] if len(df) < 24 else df['close'].iloc[-24]
             change_24h = ((price - prev_price) / prev_price) * 100
             
+            # RSI
             delta = df['close'].diff()
             gain = delta.clip(lower=0).rolling(14).mean()
             loss = (-delta.clip(upper=0)).rolling(14).mean()
             rsi = 100 - (100 / (1 + (gain.iloc[-1] / (loss.iloc[-1] + 1e-9))))
             
+            # ATR
             tr = pd.concat([
                 df['high'] - df['low'],
                 (df['high'] - df['close'].shift()).abs(),
@@ -93,6 +152,24 @@ def fetch_technical_analysis():
             ], axis=1).max(axis=1)
             atr = tr.rolling(min(14, len(df))).mean().iloc[-1]
             
+            # EMA 200
+            span_period = min(200, len(df))
+            ema200 = df['close'].ewm(span=span_period, adjust=False).mean().iloc[-1]
+
+            # Bollinger Bands %B
+            sma20 = df['close'].rolling(min(20, len(df))).mean().iloc[-1]
+            std20 = df['close'].rolling(min(20, len(df))).std().iloc[-1]
+            upper_bb = sma20 + (std20 * 2)
+            lower_bb = sma20 - (std20 * 2)
+            pct_b = (price - lower_bb) / (upper_bb - lower_bb + 1e-9)
+
+            # Volume Surge
+            vol_ma = df['volume'].rolling(min(20, len(df))).mean().iloc[-1]
+            vol_surge = (df['volume'].iloc[-1] / vol_ma) if vol_ma > 0 else 1.0
+
+            # Funding Rate
+            funding = get_binance_funding(item['symbol'])
+
             sl = price - (2 * atr)
             support = df['low'].min()
             resistance = df['high'].max()
@@ -102,34 +179,28 @@ def fetch_technical_analysis():
             rr_val = round(reward / risk, 1) if risk > 0 and reward > 0 else 0.1
             rr_str = f"1:{rr_val}"
             
-            if rsi < 30:
-                rsi_score = (30 - rsi) * 0.9 + 5.0
-            elif rsi > 70:
-                rsi_score = -(rsi - 70) * 0.8
-            else:
-                rsi_score = (rsi - 50) * 0.2
-
-            dist_to_support_pct = ((price - support) / price) * 100 if price > 0 else 10
-            support_score = max(0.0, (3.0 - dist_to_support_pct) * 2.5)
-
-            calculated_chance = 50.0 + rsi_score + support_score + (change_24h * 0.15)
-            chance = round(min(max(calculated_chance, 20.0), 82.0), 1)
+            rsi_score = (30 - rsi) * 0.9 + 5.0 if rsi < 30 else (-(rsi - 70) * 0.8 if rsi > 70 else (rsi - 50) * 0.2)
+            support_score = max(0.0, (3.0 - (((price - support) / price) * 100)) * 2.5)
+            fng_score = (50 - fng_val) * 0.2
+            ema_score = 5.0 if price > ema200 else -5.0
+            
+            calculated_chance = 50.0 + rsi_score + support_score + fng_score + ema_score + (change_24h * 0.1)
+            chance = round(min(max(calculated_chance, 20.0), 90.0), 1)
             
             rr_weight = min(max(rr_val / 2.0, 0.5), 1.3)
             okazja_score = round(min(max(chance * rr_weight, 10.0), 99.0), 1)
 
-            if okazja_score >= 70.0:
-                okazja_str = f"🔥 {okazja_score}%"
-            elif okazja_score >= 50.0:
-                okazja_str = f"👀 {okazja_score}%"
-            else:
-                okazja_str = f"⚪ {okazja_score}%"
+            okazja_str = f"🔥 {okazja_score}%" if okazja_score >= 70.0 else (f"👀 {okazja_score}%" if okazja_score >= 50.0 else f"⚪ {okazja_score}%")
 
             data.append({
                 "Token": item['symbol'],
                 "Cena ($)": fmt(price),
                 "24h (%)": round(change_24h, 2),
                 "RSI": round(rsi, 2),
+                "%B (BB)": round(pct_b, 2),
+                "EMA 200": fmt(ema200),
+                "Wolumen (x)": f"{round(vol_surge, 1)}x",
+                "Funding (%)": f"{round(funding, 4)}%",
                 "ATR": fmt(atr),
                 "SL (ATR)": fmt(sl),
                 "Wsparcie": fmt(support),
@@ -141,9 +212,9 @@ def fetch_technical_analysis():
         except Exception:
             continue
             
-    return pd.DataFrame(data)
+    return pd.DataFrame(data), fng_val, fng_class
 
-def run_predictions(df_ta):
+def run_predictions(df_ta, fng_val):
     if df_ta.empty or "Komunikat" in df_ta.columns:
         return pd.DataFrame({"Komunikat": ["Brak danych do prognozy."]})
 
@@ -162,22 +233,15 @@ def run_predictions(df_ta):
         atr = float(row["ATR"])
         rsi = float(row["RSI"])
         change = float(row["24h (%)"])
-        support = float(row["Wsparcie"])
-        resistance = float(row["Opór"])
+        pct_b = float(row["%B (BB)"])
+        funding = float(str(row["Funding (%)"]).replace('%', ''))
 
-        if rsi < 30:
-            rsi_bounce = (30 - rsi) * 0.0030
-        elif rsi > 70:
-            rsi_bounce = -(rsi - 70) * 0.0020
-        else:
-            rsi_bounce = (rsi - 50) * 0.0004
+        rsi_bounce = (30 - rsi) * 0.0030 if rsi < 30 else (-(rsi - 70) * 0.0020 if rsi > 70 else 0)
+        bb_bounce = (0.1 - pct_b) * 0.005 if pct_b < 0.1 else (-(pct_b - 0.9) * 0.005 if pct_b > 0.9 else 0)
+        funding_penalty = -0.003 if funding > 0.03 else (0.003 if funding < -0.01 else 0)
 
-        dist_to_support = ((price - support) / price) if price > 0 else 0.05
-        support_bounce = max(0.0, (0.02 - dist_to_support) * 0.5)
-
-        expected_change = (change / 100 * 0.05) + rsi_bounce + support_bounce
+        expected_change = (change / 100 * 0.05) + rsi_bounce + bb_bounce + funding_penalty
         target_price = price * (1 + expected_change)
-        target_price = min(target_price, resistance)
 
         hourly_drift = expected_change / 24.0
         hourly_vol = (atr / price) / np.sqrt(24) if price > 0 else 0.01
@@ -198,14 +262,14 @@ def run_predictions(df_ta):
         dvol_high = price * (1.0 + 1.96 * sigma_24h)
 
         if expected_change > 0:
-            if prob >= 58.0 or rsi < 25:
+            if prob >= 58.0 or rsi < 25 or fng_val < 25:
                 signal = "🟢 KUP (Mocny)"
             elif prob >= 51.0:
                 signal = "📈 KUP (Słaby)"
             else:
                 signal = "⏳ CZEKAJ / NEUTRALNY"
         else:
-            signal = "🔴 SPRZEDAJ" if prob < 42.0 else "⏳ CZEKAJ / NEUTRALNY"
+            signal = "🔴 SPRZEDAJ" if (prob < 42.0 or funding > 0.05) else "⏳ CZEKAJ / NEUTRALNY"
 
         return pd.Series([
             f"${fmt(target_price)}",
@@ -221,14 +285,17 @@ def run_predictions(df_ta):
     
     return df_ml[["Token", "Cena ($)", "Prognoza ML (24h)", "Zasięg Monte Carlo (95%)", "Zasięg Opcji DVOL (95%)", "Implikowana Zmienność (IV)", "Prawdopodobieństwo", "Sygnał Hybrydowy"]]
 
-st.set_page_config(page_title="Crypto Dashboard", layout="wide")
-st.title("📊 Zintegrowany Panel Analityczny (TA + Monte Carlo + Deribit DVOL)")
+df_ta, fng_val, fng_class = fetch_technical_analysis()
+df_ml = run_predictions(df_ta, fng_val)
+
+col_title, col_fng = st.columns([3, 1])
+with col_title:
+    st.title("📊 Zintegrowany Panel Analityczny Crypto Pro")
+with col_fng:
+    st.metric(label="Fear & Greed Index", value=f"{fng_val}/100", delta=fng_class)
 
 if st.button("🔄 Odśwież dane", type="primary"):
     st.cache_data.clear()
-
-df_ta = fetch_technical_analysis()
-df_ml = run_predictions(df_ta)
 
 tab1, tab2 = st.tabs(["1. Pełna Analiza Techniczna", "2. Prognozy ML, Monte Carlo & Opcje DVOL"])
 
