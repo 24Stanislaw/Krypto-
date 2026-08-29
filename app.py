@@ -221,7 +221,7 @@ def run_predictions(df_ta, fng_val):
     return df_ml[["Token", "Cena ($)", "RSI 1H", "RSI 4H", "RSI 12H", "MTF Zgoda", "Prognoza MC (24h)", "Zasięg Monte Carlo (95%)", "Prawdopodobieństwo", "Sygnał Hybrydowy"]]
 
 # ==========================================
-# HISTORIA BEZ ZBĘDNEJ KOLUMNY KIERUNEK
+# AUTOMATYCZNA HISTORIA BEZ KOLUMNY KIERUNEK
 # ==========================================
 HISTORY_FILE = "signals_history.csv"
 
@@ -234,8 +234,13 @@ def update_and_log_history(df_ml, df_ta):
     if os.path.exists(HISTORY_FILE):
         try: 
             df_hist = pd.read_csv(HISTORY_FILE)
-            df_hist["Cena Wejścia"] = pd.to_numeric(df_hist["Cena Wejścia"])
-            df_hist["Ekstremum Ceny"] = pd.to_numeric(df_hist["Ekstremum Ceny"])
+            # Jeśli plik ma starą kolumnę "Kierunek", automatycznie go usuwamy, aby zaktualizować schemat
+            if "Kierunek" in df_hist.columns:
+                os.remove(HISTORY_FILE)
+                df_hist = pd.DataFrame()
+            else:
+                df_hist["Cena Wejścia"] = pd.to_numeric(df_hist["Cena Wejścia"])
+                df_hist["Ekstremum Ceny"] = pd.to_numeric(df_hist["Ekstremum Ceny"])
         except Exception:
             try: os.remove(HISTORY_FILE)
             except Exception: pass
@@ -457,17 +462,9 @@ col_d.metric("Dominacja BTC", f"{btc_dom}%")
 col_f.metric("Fear & Greed", f"{fng_val}/100", fng_class)
 
 st.markdown("---")
-col_btn1, col_btn2 = st.columns([1, 4])
-with col_btn1:
-    if st.button("🔄 Odśwież dane", type="primary"):
-        st.cache_data.clear()
-        st.rerun()
-with col_btn2:
-    if st.button("🗑️ Wyczyść historię sygnałów"):
-        if os.path.exists(HISTORY_FILE):
-            os.remove(HISTORY_FILE)
-            st.success("Wyczyszczono bazę historii!")
-            st.rerun()
+if st.button("🔄 Odśwież dane", type="primary"):
+    st.cache_data.clear()
+    st.rerun()
 
 df_ta_clean = df_ta.drop(columns=["RawScore", "Price_Raw", "EMA200_Raw", "RSI_1H_Raw", "RSI_4H_Raw", "RSI_12H_Raw", "MTF_Score"], errors="ignore")
 
