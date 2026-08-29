@@ -170,7 +170,6 @@ def fetch_technical_analysis():
             lower_bb = sma20 - (std20 * 2)
             pct_b = (price - lower_bb) / (upper_bb - lower_bb + 1e-9)
 
-            # Bezpieczne obliczanie wolumenu na podstawie ostatniej ZAMKNIĘTEJ świecy
             if len(df) > 2 and df['volume'].sum() > 0:
                 vol_ma = df['volume'].iloc[:-1].rolling(min(20, len(df)-1)).mean().iloc[-1]
                 last_vol = df['volume'].iloc[-2]
@@ -328,13 +327,11 @@ def generuj_raport_ai(row_ta, row_ml=None):
     ema200_val = row_ta.get("EMA200_Raw", 0.0)
     pct_b = float(row_ta.get("%B (BB)", 0.5))
 
-    # Analiza szerszego trendu (EMA 200)
     if isinstance(price_val, (float, int)) and isinstance(ema200_val, (float, int)) and ema200_val > 0:
         trend_desc = "wzrostowym (cena znajduje się powyżej kluczowej średniej EMA 200, co historycznie faworyzuje długie pozycje)" if price_val > ema200_val else "spadkowym (cena poniżej EMA 200 generuje techniczną presję podażową)"
     else:
         trend_desc = "bocznym lub brakuje wyraźnego potwierdzenia kierunku"
 
-    # Rozbudowana Analiza RSI
     if rsi < 30:
         rsi_desc = f"na ekstremalnie niskim poziomie **{rsi}**. Świadczy to o głębokim wyprzedaniu i potencjalnej rynkowej panice. Sprzedający wyczerpują swoje siły, co często jest preludium do dynamicznego odbicia w górę (tzw. relief rally)."
     elif rsi > 70:
@@ -346,7 +343,6 @@ def generuj_raport_ai(row_ta, row_ml=None):
     else:
         rsi_desc = f"na poziomie **{rsi}**, potwierdzając zdrową kontrolę kupujących. Wciąż istnieje bezpieczna przestrzeń na kontynuację trendu wzrostowego, zanim wskaźniki ulegną niebezpiecznemu przegrzaniu."
 
-    # Rozbudowana Analiza Wolumenu
     vol_raw = float(row_ta.get("Vol_Surge_Raw", 1.0))
     if vol_raw >= 2.0:
         vol_desc = f"odnotowano olbrzymią anomalię obrotu (**{vol_str}** standardowej średniej). Do gry wszedł potężny kapitał instytucjonalny, silnie uprawomocniając aktualny kierunek cenowy."
@@ -357,7 +353,6 @@ def generuj_raport_ai(row_ta, row_ml=None):
     else:
         vol_desc = f"rynek handluje przy zachowaniu standardowego obrotu (**{vol_str}** średniej). Brakuje tu niespodziewanych zrywów płynnościowych."
 
-    # Wstęgi Bollingera (%B)
     if pct_b < 0:
         bb_desc = "Cena drastycznie wyłamała się poniżej dolnej Wstęgi Bollingera. Jest to rzadka anomalia statystyczna i historycznie wymusza silną reakcję powrotną do średniej, tworząc okazję zakupową."
     elif pct_b > 1:
@@ -365,7 +360,6 @@ def generuj_raport_ai(row_ta, row_ml=None):
     else:
         bb_desc = f"Notowania przebywają bezpiecznie w kanale Wstęg Bollingera (wskaźnik %B = {pct_b})."
 
-    # Modele ML i Statystyka Zmienności
     prog, mc, iv, prob, signal = "-", "-", "-", "-", "-"
     prob_num = 50.0
     iv_num = 50.0
@@ -390,7 +384,6 @@ def generuj_raport_ai(row_ta, row_ml=None):
     else:
         zmiennosc_desc = "Pozostaje zadziwiająco niska. Możemy mieć do czynienia ze zjawiskiem kompresji zmienności (ciszy przed burzą)."
 
-    # Budowa scenariuszy przyszłości
     if prob_num > 55:
         scenariusz = f"Najbardziej prawdopodobnym wydarzeniem w perspektywie najbliższych sesji jest **zdecydowany atak kapitału w kierunku wyznaczonego oporu przy cenie ${resistance_str}**. Obliczenia modeli hybrydowych zdecydowanie faworyzują kupujących, a ewentualne mniejsze korekty powinny być szybko pochłaniane przez popyt."
     elif prob_num < 45:
@@ -398,7 +391,6 @@ def generuj_raport_ai(row_ta, row_ml=None):
     else:
         scenariusz = f"Brak wyrazistego rozstrzygnięcia. Kurs najpewniej utknie w **bocznym przedziale nakreślonym przez statystykę Monte Carlo ({mc})**. Bez silnego impulsu makroekonomicznego rynek przeczeka ten czas w zawieszeniu."
 
-    # Ostateczna ewaluacja inwestycyjna
     pewnosc = max(prob_num, 100 - prob_num)
     if "KUP (Mocny)" in signal:
         decyzja = "🟢 **ZDECYDOWANIE KUPUJ**"
@@ -452,7 +444,7 @@ df_ta, fng_val, fng_class, btc_dom, btc_d1_price, btc_d1_ema200, loaded_count, t
 
 col_title, col_btc_macro, col_dom, col_fng = st.columns([2.0, 1.1, 0.9, 1.0])
 with col_title:
-    st.title("🎯 Crypto Spot Pro")
+    st.title("📊 Analiza")
     st.caption(f"Aktualizacja: {pd.Timestamp.now().strftime('%H:%M:%S')} | Tokeny: {loaded_count}/{total_count}")
 
 with col_btc_macro:
