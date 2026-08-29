@@ -36,6 +36,23 @@ if not check_password():
     st.stop()
 
 # ==========================================
+# PANEL BOCZNY (ZARZĄDZANIE / RESET)
+# ==========================================
+with st.sidebar:
+    st.subheader("⚙️ Narzędzia i Zarządzanie")
+    if st.button("🗑️ Resetuj historię i zacznij od nowa", type="secondary"):
+        HISTORY_FILE = "signals_history.csv"
+        if os.path.exists(HISTORY_FILE):
+            try:
+                os.remove(HISTORY_FILE)
+            except Exception:
+                pass
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.success("Wyczyszczono historię i stan aplikacji!")
+        st.rerun()
+
+# ==========================================
 # LISTA TOKENÓW SPOT
 # ==========================================
 TOKENS = [
@@ -249,7 +266,7 @@ def fetch_technical_analysis():
             if rsi_2h <= 48: mtf_score += 1
             if rsi_4h <= 52: mtf_score += 1
             if rsi_12h <= 55: mtf_score += 1
-            if macd_hist > 0: mtf_score += 1  # Dodatkowe wzmocnienie za MACD Histogram
+            if macd_hist > 0: mtf_score += 1
 
             okazja_score = round(min(max((mtf_score * 16.5) + (50 - rsi_4h) * 0.5 + (10.0 if price > ema200_4h else 0), 10.0), 99.0), 1)
             okazja_str = f"🔥 {okazja_score}%" if okazja_score >= 70.0 else (f"👀 {okazja_score}%" if okazja_score >= 50.0 else f"⚪ {okazja_score}%")
