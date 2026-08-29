@@ -359,7 +359,6 @@ def fetch_technical_analysis():
       reward = resistance - price
       rr_val = round(reward / risk, 1) if risk > 0 and reward > 0 else 0.1
 
-      # Inteligentna klasyfikacja reżimu rynkowego (zamiast punktów)
       if price > ema200_4h and macd_hist > 0:
         regime = "Silny Trend Wzrostowy"
       elif price > ema200_4h and macd_hist <= 0:
@@ -475,7 +474,6 @@ def run_predictions(df_ta, btc_dom):
     is_altcoin = symbol not in ["BTC", "ETH"]
     macro_headwind = btc_dom > 57.0 and is_altcoin
 
-    # Rygorystyczny filtr egzekucji oparty na przewadze (Edge)
     if macro_headwind:
       signal = "⏳ ODRZUCONY (Silna dominacja BTC / Brak płynności)"
     elif regime == "Silny Trend Wzrostowy" and is_bouncing:
@@ -504,10 +502,14 @@ def run_predictions(df_ta, btc_dom):
       "Ocena Przewagi (Edge)",
   ]] = df_ml.apply(analyze_row, axis=1)
 
+  # Przywrócenie kolumny Atrakcyjność (%) w tabeli głównej oraz macierzy
+  df_ml["Atrakcyjność (%)"] = df_ml["Prawdopodobieństwo"]
+
   return df_ml[[
       "Token",
       "Cena ($)",
       "Reżim Rynkowy",
+      "Atrakcyjność (%)",
       "Prognoza MC (24h)",
       "Zasięg Monte Carlo (95%)",
       "Prawdopodobieństwo",
@@ -638,7 +640,7 @@ def get_backtest_stats(target_pct_str):
 
 
 # ==========================================
-# EKSPERCKI RAPORT AI (SYNTEZA BEZ WMANIPULOWANEJ PłYTKOŚCI)
+# EKSPERCKI RAPORT AI (SZCZEGÓŁOWY OPIS WSKAŹNIKÓW I WNIOSKI)
 # ==========================================
 def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
   symbol = row_ta.get("Token", "UNKNOWN")
@@ -648,6 +650,7 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
   regime = row_ta.get("Reżim Rynkowy", "Neutralny")
   rsi_1h = round(float(row_ta.get("RSI_1H_Raw", 50)), 1)
   rsi_4h = round(float(row_ta.get("RSI_4H_Raw", 50)), 1)
+  macd_hist_str = row_ta.get("MACD Hist (4H)", "0.0")
   change_24h = row_ta.get("24h (%)", "0.0")
   support_str = row_ta.get("Wsparcie", "0.00")
   resistance_str = row_ta.get("Opór", "0.00")
@@ -664,20 +667,20 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
       row_ml.get("Prawdopodobieństwo", "50.0%") if row_ml is not None else "50%"
   )
 
-  # Wnioskowanie eksperckie zamiast suchego przepisywania liczb
+  # Dokładna diagnoza strukturalna
   if "Silny Trend" in regime:
-    conclusion = f"Struktura jest czysta. Kupujący kontrolują sytuację na 4H, a cena (${fmt(price_raw)}) utrzymuje się ponad EMA200. Jest to środowisko sprzyjające kontynuacji wzrostów, o ile kapitał nie odpływa do Bitcoina."
+    conclusion = f"Struktura jest czysta. Kupujący kontrolują sytuację na 4H, a cena (${fmt(price_raw)}) utrzymuje się ponad EMA200 (${fmt(ema_raw)}). Środowisko sprzyja kontynuacji wzrostów."
   elif "Korekta" in regime:
-    conclusion = f"Rynek realizuje zdrowe cofnięcie do strefy popytowej. Kluczowe jest utrzymanie wsparcia (${support_str}). Jeśli cena zareaguje odbiciem, pojawia się wysoki współczynnik R:R ({rr}) do zagrania w kierunku głównego trendu."
+    conclusion = f"Rynek realizuje zdrowe cofnięcie do strefy popytowej. Kluczowe jest utrzymanie wsparcia (${support_str}). Reagowanie w tej strefie otwiera korzystny R/R ({rr})."
   elif "Spadkowy" in regime:
-    conclusion = f"Brak struktur obronnych ze strony popytu. Cena pod średnią EMA200 (${fmt(ema_raw)}) oznacza, że każda próba zakupu bez silnego potwierdzenia wolumenowego to łapanie spadającego noża."
+    conclusion = f"Brak struktur obronnych ze strony popytu. Cena znajduje się poniżej średniej EMA200 (${fmt(ema_raw)}), co oznacza, że zakupy bez wolumenu to łapanie spadającego noża."
   else:
-    conclusion = f"Brak wyraźnego reżimu kierunkowego. Ciasna konsolidacja na interwałach niskich generuje fałszywe sygnały oscylatorów. Wskazana cierpliwość."
+    conclusion = f"Brak wyraźnego reżimu kierunkowego. Ciasna konsolidacja generuje szum na wskaźnikach."
 
   if symbol not in ["BTC", "ETH"] and btc_dom > 57.0:
-    macro_warning = f"⚠️ **Ryzyko Systemowe:** Dominacja BTC na poziomie `{btc_dom}%` oznacza, że altcoiny są systemowo odcięte od dopływu nowego kapitału spekulacyjnego. Nawet najlepszy układ techniczny na altcoinie może zostać unieważniony ruchem lidera."
+    macro_warning = f"⚠️ **Ryzyko Systemowe:** Dominacja BTC na poziomie `{btc_dom}%` odcina altcoiny od kapitału spekulacyjnego."
   else:
-    macro_warning = f"✅ **Otoczenie Makro:** Płynność sprzyja wycenie aktywa (Dominacja BTC: `{btc_dom}%`)."
+    macro_warning = f"✅ **Otoczenie Makro:** Płynność rynkowa sprzyja wycenie (Dominacja BTC: `{btc_dom}%`)."
 
   tp_5 = price_raw * 1.05
   tp_75 = price_raw * 1.075
@@ -686,7 +689,7 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
   return f"""
 ### 🎯 SYNTEZA EKSPERCKA: {symbol}
 **Werdykt Algorytmu:** `{edge_status}`  
-**Cena:** `${price_str}` | **Reżim Rynkowy:** **{regime}**
+**Cena Aktualna:** `${price_str}` (Zmiana 24h: `{change_24h}%`) | **Reżim Rynkowy:** **{regime}**
 
 ---
 
@@ -694,12 +697,19 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
 * **Ocena sytuacji:** {conclusion}
 * {macro_warning}
 
-#### 2. 🎲 Symulacja Monte Carlo i Prawdopodobieństwo
-* **Oczekiwana mediana (24h):** `{prognoza_mc}` (Szansa wyjścia na plus: **{prob_str}**).
+#### 2. 📈 Szczegółowy Rozbiór Wskaźników Technicznych
+* **RSI 1H (`{rsi_1h}`):** Odzwierciedla krótkoterminową dynamikę pędu. Wartości powyżej 70 sugerują lokalne przegrzanie, poniżej 30 wyprzedanie.
+* **RSI 4H (`{rsi_4h}`):** Średnioterminowy filtr trendu. Pozwala ocenić, w której fazie cyklu korekcyjnego znajduje się aktywo.
+* **MACD Histogram (4H) (`{macd_hist_str}`):** Mierzy impet zmiany trendu. Wartość ujemna wskazuje na dominację strony podażowej, dodatnia na przewagę kupujących.
+* **Średnia EMA 200 (4H) (`{fmt(ema_raw)}`):** Główny wyznacznik długoterminowej równowagi trendu.
+
+#### 3. 🎲 Symulacja Monte Carlo i Prawdopodobieństwo
+* **Szansa wyjścia na plus:** `{prob_str}` (Oczekiwana mediana 24h: `{prognoza_mc}`).
 * **Interpretacja:** Model probabilistyczny uwzględnia bieżącą zmienność stochastyczną (ATR/drift) – traktuj prognozę jako ramy statystyczne, a nie pewność.
 
-#### 3. 🛡️ Inżynieria Pozycji i Inwalidacja Setupu
+#### 4. 🛡️ Inżynieria Pozycji i Zarządzanie Ryzykiem
 * **Strefa Inwalidacji (Stop Loss - 2x ATR):** `${sl_str}` – zamknięcie świecy 4H poniżej tego poziomu unieważnia tezę wzrostową.
+* **Stosunek Zysku do Ryzyka (R:R):** `{rr}`.
 * **Granice Płynności:** Wsparcie bazowe: `${support_str}` | Opór strukturalny: `${resistance_str}`
 * **Docelowe poziomy realizacji zysków (TP):**
   * **TP 1 (+5%):** `${fmt(tp_5)}`
@@ -758,6 +768,10 @@ df_ta_clean = df_ta.drop(
     ],
     errors="ignore",
 )
+
+# Dodanie kolumny Atrakcyjność (%) również do tabeli głównej reżimów
+if "Atrakcyjność (%)" not in df_ta_clean.columns and not df_ml.empty:
+  df_ta_clean["Atrakcyjność (%)"] = df_ml["Atrakcyjność (%)"]
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "1. Reżimy i Stan Rynku",
@@ -829,10 +843,7 @@ with tab3:
             use_container_width=True,
         )
       else:
-        st.info(
-            "Brak aktywnych pozycji. Wybierz token z zakładki 'Ocena Przewagi'"
-            " i dodaj go ręcznie."
-        )
+        st.info("Brak aktywnych pozycji.")
     except Exception:
       st.info("Brak danych.")
   else:
