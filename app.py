@@ -267,6 +267,10 @@ def fetch_technical_analysis():
             okazja_score = round(min(max((mtf_score * 16.5) + (50 - rsi_4h) * 0.5 + (10.0 if price > ema200_4h else 0), 10.0), 99.0), 1)
             okazja_str = f"🔥 {okazja_score}%" if okazja_score >= 70.0 else (f"👀 {okazja_score}%" if okazja_score >= 50.0 else f"⚪ {okazja_score}%")
 
+            last_close = float(df_1h['close'].iloc[-1])
+            last_open = float(df_1h['open'].iloc[-1])
+            is_bouncing = last_close >= last_open
+
             data.append({
                 "Token": symbol, "Cena ($)": fmt(price), "24h (%)": round(change_24h, 2),
                 "RSI 1H": round(rsi_1h, 1), "RSI 4H": round(rsi_4h, 1), "RSI 12H": round(rsi_12h, 1),
@@ -275,7 +279,7 @@ def fetch_technical_analysis():
                 "Atrakcyjność (%)": okazja_str, "RawScore": okazja_score, "Price_Raw": float(price), "EMA200_Raw": float(ema200_4h),
                 "Support_Raw": float(support), "Resistance_Raw": float(resistance),
                 "RSI_1H_Raw": float(rsi_1h), "RSI_4H_Raw": float(rsi_4h), "RSI_12H_Raw": float(rsi_12h), "MTF_Score": mtf_score,
-                "Vol_Raw": vol_1h, "Drift_Raw": drift_1h
+                "Vol_Raw": vol_1h, "Drift_Raw": drift_1h, "Is_Bouncing": is_bouncing
             })
             loaded_count += 1
         except Exception:
@@ -288,24 +292,26 @@ def fetch_technical_analysis():
                 "Atrakcyjność (%)": "⚪ 50.0%", "RawScore": 50.0, "Price_Raw": p, "EMA200_Raw": p,
                 "Support_Raw": p * 0.95, "Resistance_Raw": p * 1.05,
                 "RSI_1H_Raw": 50.0, "RSI_4H_Raw": 50.0, "RSI_12H_Raw": 50.0, "MTF_Score": 2,
-                "Vol_Raw": 0.015, "Drift_Raw": 0.0
+                "Vol_Raw": 0.015, "Drift_Raw": 0.0, "Is_Bouncing": False
             })
             loaded_count += 1
             
     return pd.DataFrame(data), fng_val, fng_class, btc_dom, alt_season, loaded_count, len(TOKENS)
 
-def run_predictions(df_ta, fng_val):
+def run_predictions(df_ta, btc_dom, alt_season):
     if df_ta.empty:
         return pd.DataFrame()
 
     rng = np.random.default_rng(seed=int(pd.Timestamp.now().strftime("%Y%m%d%H")))
 
     def analyze_row(row):
+        symbol = row["Token"]
         price = float(row["Price_Raw"])
         ema_raw = float(row["EMA200_Raw"])
         support_raw = float(row["Support_Raw"])
         vol_1h = float(row.get("Vol_Raw", 0.015))
         drift_1h = float(row.get("Drift_Raw", 0.0))
+        is_bouncing = bool(row.get("Is_Bouncing", False))
         
         rsi_1h = float(row["RSI_1H_Raw"])
         rsi_4h = float(row["RSI_4H_Raw"])
@@ -325,17 +331,22 @@ def run_predictions(df_ta, fng_val):
         ci_upper = float(np.percentile(final_prices, 97.5))
         prob_up = float(np.mean(final_prices > price) * 100)
 
-        # Precyzyjne filtry dla rynku SPOT (Long-only + Test wsparcia 4H + Trend EMA 200)
         dist_to_support = (price - support_raw) / price if price > 0 else 1.0
-        is_near_support = dist_to_support <= 0.035  # Cena blisko wsparcia 4H (do 3.5%)
-        is_bullish_trend = price > ema_raw         # Brak spadających noży (powyżej EMA 200 H4)
+        is_near_support = dist_to_support <= 0.035
+        is_bullish_trend = price > ema_raw
 
-        if is_bullish_trend and is_near_support and rsi_1h <= 48 and prob_up > 50.0:
+        is_altcoin = symbol not in ['BTC', 'ETH']
+        macro_headwind = (btc_dom > 57.0 and is_altcoin)
+        min_prob_required = 62.0 if macro_headwind else 58.0
+
+        if is_bullish_trend and is_near_support and is_bouncing and rsi_1h <= 48 and prob_up > min_prob_required:
             signal = "🟢 KUP (Test Wsparcia 4H - Long)"
-        elif is_bullish_trend and mtf_score >= 3 and prob_up > 55.0:
+        elif is_bullish_trend and mtf_score >= 4 and prob_up > (min_prob_required + 3.0):
             signal = "📈 KUP (Silny Trend MTF - Long)"
         elif rsi_1h >= 68 or rsi_4h >= 72:
             signal = "⚠️ OSTRZEŻENIE / WYKUPIONY"
+        elif macro_headwind and is_near_support:
+            signal = "⏳ CZEKAJ / Silna dominacja BTC (Brak przepływu)"
         else:
             signal = "⏳ CZEKAJ / Czekaj na strefę"
 
@@ -444,21 +455,24 @@ def get_backtest_stats(target_pct_str):
     win_rate = round((wins / total) * 100, 1) if total > 0 else 0.0
     return pd.DataFrame(results), total, wins, win_rate
 
-def generuj_raport_ai(row_ta, row_ml=None):
-    symbol = row_ta.get("Token")
-    price_str = row_ta.get("Cena ($)")
+# ==========================================
+# ROZBUDOWANA FUNKCJA EKSPERCKIEGO RAPORTU AI
+# ==========================================
+def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0, alt_season=45):
+    symbol = row_ta.get("Token", "UNKNOWN")
+    price_str = row_ta.get("Cena ($)", "0.00")
     price_raw = float(row_ta.get("Price_Raw", 0))
     ema_raw = float(row_ta.get("EMA200_Raw", 0))
     rsi_1h = float(row_ta.get("RSI_1H_Raw", 50))
     rsi_4h = float(row_ta.get("RSI_4H_Raw", 50))
     rsi_12h = float(row_ta.get("RSI_12H_Raw", 50))
-    macd_hist = row_ta.get("MACD Hist (4H)")
-    mtf_score = row_ta.get("MTF Zgoda")
-    change_24h = row_ta.get("24h (%)")
-    support_str = row_ta.get("Wsparcie")
-    resistance_str = row_ta.get("Opór")
-    sl_str = row_ta.get("SL (ATR)")
-    rr = row_ta.get("R:R")
+    macd_hist = float(row_ta.get("MACD Hist (4H)", 0.0) if isinstance(row_ta.get("MACD Hist (4H)"), (int, float)) else 0.0)
+    mtf_score = row_ta.get("MTF Zgoda", "0/5")
+    change_24h = row_ta.get("24h (%)", "0.0")
+    support_str = row_ta.get("Wsparcie", "0.00")
+    resistance_str = row_ta.get("Opór", "0.00")
+    sl_str = row_ta.get("SL (ATR)", "0.00")
+    rr = row_ta.get("R:R", "1:1")
 
     prognoza_mc, mc_range, prob_str, signal = "-", "-", "50.0%", "⏳ CZEKAJ / NEUTRALNY"
     if row_ml is not None:
@@ -467,37 +481,55 @@ def generuj_raport_ai(row_ta, row_ml=None):
         prob_str = row_ml.get("Prawdopodobieństwo", "50.0%")
         signal = row_ml.get("Sygnał Hybrydowy", "⏳ CZEKAJ / NEUTRALNY")
 
-    trend_status = "🟢 Byczy (Cena powyżej EMA 200 H4)" if price_raw > ema_raw else "🔴 Niedźwiedzi / Boczny (Cena poniżej EMA 200 H4)"
+    if price_raw > ema_raw:
+        trend_desc = f"🟢 **Silny układ popytowy.** Cena (${fmt(price_raw)}) znajduje się bezpiecznie **powyżej średniej EMA 200 (4H)** (${fmt(ema_raw)}), co oznacza, że średnioterminowy trend wzrostowy pozostaje nienaruszony."
+    else:
+        trend_desc = f"🔴 **Presja podażowa / Konsolidacja.** Cena (${fmt(price_raw)}) oscyluje **poniżej EMA 200 (4H)** (${fmt(ema_raw)}), co wskazuje na dominację sprzedających lub brak zdecydowanego kierunku."
+
+    if rsi_1h < 40:
+        rsi_comment = "RSI na interwale 1H sygnalizuje **wyprzedanie (oversold)**, co historycznie często poprzedza lokalne odbicie lub dynamiczny ruch powrotny do średniej."
+    elif rsi_1h > 65:
+        rsi_comment = "RSI na interwale 1H zbliża się do strefy **wykupienia (overbought)** – rośnie ryzyko krótkoterminowej korekty lub realizacji zysków."
+    else:
+        rsi_comment = "RSI na interwale 1H znajduje się w **strefie neutralnej**, co daje przestrzeń do ruchu w obu kierunkach bez natychmiastowego zagrożenia skrajnym wykupieniem."
+
+    if symbol not in ['BTC', 'ETH'] and btc_dom > 57.0:
+        macro_comment = f"⚠️ **Uwaga Makro:** Dominacja Bitcoina wynosi aż `{btc_dom}%`. Kapitał koncentruje się na BTC, co mocno ogranicza płynność i dynamikę wzrostów na altcoinach."
+    else:
+        macro_comment = f"✅ **Otoczenie Makro:** Warunki rynkowe (Dominacja BTC: `{btc_dom}%`, Indeks Sezonu Altcoinów: `{alt_season}/100`) sprzyjają swobodnemu przepływowi kapitału na ten token."
 
     tp_5 = price_raw * 1.05
     tp_75 = price_raw * 1.075
     tp_10 = price_raw * 1.10
 
     return f"""
-### 📑 RAPORT ANALITYCZNY MTF AI (SPOT): {symbol}
-**Aktualna cena:** `${price_str}` | **Zmiana 24h:** `{change_24h}%` | **Rekomendacja:** **{signal}**
+### 📑 EKSPERCKI RAPORT SYNTEZY AI (SPOT): {symbol}
+**Aktualna cena:** `${price_str}` | **Zmiana 24h:** `{change_24h}%` | **Werdykt Systemu:** **{signal}**
 
 ---
 
-#### 1. 📌 Podsumowanie i MTF Konsensus
-* **Status Sygnału:** **{signal}**
-* **Zgoda Multi-Timeframe:** `{mtf_score}`
-* **Struktura Rynku:** Token znajduje się w trendzie **{trend_status}**.
+#### 1. 🧠 Diagnoza Kondycji Rynku (Struktura i Makro)
+* {trend_desc}
+* {macro_comment}
+* **Zgoda Multi-Timeframe (MTF):** `{mtf_score}` wskaźników potwierdza spójność sygnału w ujęciu wielointerwałowym.
 
-#### 2. 📊 Układ Wskaźników Technicznych (RSI & MACD)
-* **RSI 1H:** `{rsi_1h}` | **RSI 4H:** `{rsi_4h}` | **RSI 12H:** `{rsi_12h}`
-* **MACD Histogram (4H):** `{macd_hist}`
-* **Średnia EMA 200 (4H):** `${fmt(ema_raw)}`
+#### 2. 📊 Anatomia Wskaźników (RSI & MACD)
+* **Rozkład siły RSI:** * Krótki termin (1H): **`{rsi_1h}`** ({rsi_comment})
+  * Średni termin (4H): **`{rsi_4h}`** | Długi termin (12H): **`{rsi_12h}`**
+* **Dynamika momentum (MACD 4H):** Wartość histogramu wynosi `{macd_hist}`. {'Pęd popytowy zyskuje na sile.' if macd_hist > 0 else 'Widoczna przewaga sił niedźwiedzia lub wygaszanie dynamiki.'}
 
-#### 3. 🎲 Symulacja Monte Carlo (24h)
-* **Średnia prognoza Monte Carlo:** `{prognoza_mc}`
-* **Przewidywany zasięg (95% pewności):** `{mc_range}`
-* **Statystyczna szansa wzrostu:** **{prob_str}**
+#### 3. 🎲 Symulacja Stochastyczna Monte Carlo (Horyzont 24h)
+* **Prognozowana mediana ceny:** `{prognoza_mc}` przy statystycznym prawdopodobieństwie kontynuacji wzrostu na poziomie **{prob_str}**.
+* **Przedział ufności (95% prawdopodobieństwa):** Cena w ciągu najbliższej doby powinna poruszać się w korytarzu **`{mc_range}`**. Model szacuje te granice na podstawie wzdłużnej zmienności historycznej (ATR/Log Returns).
 
-#### 4. 🎯 Poziomy Docelowe Take Profit & Risk Management
-* **Kluczowe Wsparcie:** `${support_str}` | **Kluczowy Opór:** `${resistance_str}`
-* **Stop Loss (2x ATR):** `${sl_str}` | **R:R:** `{rr}`
-* **Targety TP:** **TP1 (+5%):** `${fmt(tp_5)}` | **TP2 (+7.5%):** `${fmt(tp_75)}` | **TP3 (+10%):** `${fmt(tp_10)}`
+#### 4. 🛡️ Strategia Zarządzania Ryzykiem i Egzekucja
+* **Strefa wsparcia (obrona):** `${support_str}` | **Strefa oporu (cel):** `${resistance_str}`
+* **Inwalidacja sygnału (Stop Loss - 2x ATR):** `${sl_str}` – przebicie tego poziomu unieważnia scenariusz wzrostowy.
+* **Wskaźnik Zysku do Ryzyka (R:R):** `{rr}`
+* **Proponowane poziomy Take Profit:**
+  * **TP1 (+5%):** `${fmt(tp_5)}` (Pierwsza strefa częściowej realizacji zysków)
+  * **TP2 (+7.5%):** `${fmt(tp_75)}` (Optymalny target zasięgu intraday)
+  * **TP3 (+10%):** `${fmt(tp_10)}` (Maksymalny zasięg przy silnym impulsie)
 """
 
 # ==========================================
@@ -505,7 +537,7 @@ def generuj_raport_ai(row_ta, row_ml=None):
 # ==========================================
 with st.spinner("🔄 Pobieram dane i obliczam Multi-Timeframe..."):
     df_ta, fng_val, fng_class, btc_dom, alt_season, loaded_c, total_c = fetch_technical_analysis()
-    df_ml = run_predictions(df_ta, fng_val)
+    df_ml = run_predictions(df_ta, btc_dom, alt_season)
     update_history_status(df_ta)
 
 col_t, col_d1, col_d2, col_f = st.columns([2.0, 1, 1, 1])
@@ -520,7 +552,7 @@ if st.button("🔄 Odśwież dane", type="primary"):
     st.cache_data.clear()
     st.rerun()
 
-df_ta_clean = df_ta.drop(columns=["RawScore", "Price_Raw", "EMA200_Raw", "Support_Raw", "Resistance_Raw", "RSI_1H_Raw", "RSI_4H_Raw", "RSI_12H_Raw", "MTF_Score", "Vol_Raw", "Drift_Raw"], errors="ignore")
+df_ta_clean = df_ta.drop(columns=["RawScore", "Price_Raw", "EMA200_Raw", "Support_Raw", "Resistance_Raw", "RSI_1H_Raw", "RSI_4H_Raw", "RSI_12H_Raw", "MTF_Score", "Vol_Raw", "Drift_Raw", "Is_Bouncing"], errors="ignore")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "1. Tabela Techniczna MTF", 
@@ -612,6 +644,12 @@ with tab5:
 
 if not df_ta.empty:
     st.divider()
-    st.subheader("🤖 Raport Analityczny MTF AI")
+    st.subheader("🤖 Ekspercki Raport Analityczny MTF AI")
     sel_ai = st.selectbox("Wybierz token do pełnego raportu:", df_ta["Token"].tolist(), key="ai_box")
-    st.markdown(generuj_raport_ai(df_ta[df_ta["Token"] == sel_ai].iloc[0], df_ml[df_ml["Token"] == sel_ai].iloc[0] if not df_ml.empty else None))
+    
+    # Pobranie odpowiednich wierszy dla wybranego tokena
+    selected_row_ta = df_ta[df_ta["Token"] == sel_ai].iloc[0]
+    selected_row_ml = df_ml[df_ml["Token"] == sel_ai].iloc[0] if not df_ml.empty else None
+    
+    # Wygenerowanie i wyświetlenie pełnego raportu z uwzględnieniem makro
+    st.markdown(generuj_raport_ai(selected_row_ta, selected_row_ml, btc_dom=btc_dom, alt_season=alt_season))
