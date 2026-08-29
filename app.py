@@ -310,7 +310,7 @@ def run_predictions(df_ta, fng_val):
     return df_ml[["Token", "Cena ($)", "Prognoza ML (24h)", "Zasięg Monte Carlo (95%)", "Zasięg Opcji DVOL (95%)", "Implikowana Zmienność (IV)", "Prawdopodobieństwo", "Sygnał Hybrydowy"]]
 
 # ==========================================
-# MODUŁ ŚLEDZENIA SKUTECZNOŚCI (SPOT BACKTEST ±5%, ±7.5%, ±10%)
+# MODUŁ ŚLEDZENIA SKUTECZNOŚCI (SPOT BACKTEST)
 # ==========================================
 HISTORY_FILE = "signals_history.csv"
 
@@ -377,9 +377,6 @@ def get_backtest_stats(df_current_prices, target_pct=5.0):
         
         current_price = price_map.get(token, entry_price)
         change_pct = ((current_price - entry_price) / entry_price) * 100
-        
-        # Symulacja Spot z wybranym progiem (np. 5%, 7.5%, 10%)
-        # Sprawdzamy czy osiągnęło cel TP (+target_pct) lub SL (-target_pct) w horyzoncie 30 dni
         days_passed = (pd.Timestamp.now() - signal_date).days
         
         if "KUP" in sig_type:
@@ -395,7 +392,7 @@ def get_backtest_stats(df_current_prices, target_pct=5.0):
             else:
                 status = "🔄 W toku (Spot)"
                 is_win = change_pct >= 0
-        else: # Dla sygnałów sprzedaży
+        else:
             if change_pct <= -target_pct:
                 status = f"✅ TP (+{target_pct}%)"
                 is_win = True
@@ -532,8 +529,13 @@ log_signals_to_history(df_ml)
 
 df_ta_clean = df_ta.drop(columns=["RawScore", "Vol_Surge_Raw", "Price_Raw", "EMA200_Raw", "BTC_D1_Price", "BTC_D1_EMA200"], errors="ignore")
 
-# ZAKŁADKI APLIKACJI
-tab1, tab2, tab3 = st.tabs(["1. Tabela Techniczna Spot", "2. Sygnały Hybrydowe & Monte Carlo", "3. Skuteczność Sygnałów (Backtest)"])
+# ZAKŁADKI APLIKACJI (Dodana 4. zakładka Archiwum)
+tab1, tab2, tab3, tab4 = st.tabs([
+    "1. Tabela Techniczna Spot", 
+    "2. Sygnały Hybrydowe & Monte Carlo", 
+    "3. Skuteczność Sygnałów (Backtest)", 
+    "4. 🗂️ Archiwum Sygnałów"
+])
 
 with tab1:
     st.dataframe(df_ta_clean.style.map(lambda v: 'color: #2e7d32; font-weight: bold;' if isinstance(v, (int, float)) and v > 0 else ('color: #c62828; font-weight: bold;' if isinstance(v, (int, float)) and v < 0 else ''), subset=['24h (%)']), use_container_width=True)
@@ -545,8 +547,7 @@ with tab3:
     st.subheader("📈 Analiza Historyczna Skuteczności (Spot)")
     st.caption("Wybierz próg docelowy zysku i straty (TP / SL), aby sprawdzić jak model radzi sobie na rynku spot w horyzoncie do 30 dni.")
     
-    # Wybór progów: 5%, 7.5%, 10%
-    target_choice = st.radio("Wybierz próg testowy:", ["5%", "7.5%", "10%"], horizontal=True, index=0)
+    target_choice = st.radio("Wybierz próg testowy:", ["5%", "7.5%", "10%"], horizontal=True, index=0, key="backtest_radio")
     target_val = 5.0 if target_choice == "5%" else (7.5 if target_choice == "7.5%" else 10.0)
     
     bt_df, total_sigs, win_sigs, win_rate = get_backtest_stats(df_ta, target_pct=target_val)
@@ -561,6 +562,39 @@ with tab3:
         st.dataframe(bt_df, use_container_width=True)
     else:
         st.info("Brak zapisanej historii. Sygnały zaczną się zbierać automatycznie po kolejnych odświeżeniach danych.")
+
+with tab4:
+    st.subheader("🗂️ Pełne Archiwum Wygenerowanych Sygnałów")
+    st.caption("Przeglądaj wszystkie historyczne wpisy zapisane w systemie. Możesz filtrować po interesującym Cię tokenie.")
+    
+    if os.path.exists(HISTORY_FILE):
+        try:
+            df_history_raw = pd.read_csv(HISTORY_FILE)
+        except Exception:
+            df_history_raw = pd.DataFrame()
+            
+        if not df_history_raw.empty:
+            # Filtry w zakładce Archiwum
+            f_col1, f_col2 = st.columns(2)
+            
+            all_tokens_in_hist = ["Wszystkie"] + sorted(df_history_raw["Token"].unique().tolist())
+            selected_filter_token = f_col1.selectbox("Filtruj po tokenie:", all_tokens_in_hist)
+            
+            all_types = ["Wszystkie"] + sorted(df_history_raw["Typ Sygnału"].unique().tolist())
+            selected_filter_type = f_col2.selectbox("Filtruj po typie sygnału:", all_types)
+            
+            df_filtered = df_history_raw.copy()
+            if selected_filter_token != "Wszystkie":
+                df_filtered = df_filtered[df_filtered["Token"] == selected_filter_token]
+            if selected_filter_type != "Wszystkie":
+                df_filtered = df_filtered[df_filtered["Typ Sygnału"] == selected_filter_type]
+                
+            st.info(f"Wyświetlam {len(df_filtered)} z {len(df_history_raw)} wpisów w archiwum.")
+            st.dataframe(df_filtered.sort_values(by="Data", ascending=False), use_container_width=True)
+        else:
+            st.info("Plik historii jest pusty.")
+    else:
+        st.info("Brak pliku z historią sygnałów. Pojawi się on automatycznie po wygenerowaniu pierwszych typów.")
 
 # ==========================================
 # RAPORT ANALITYCZNY AI
