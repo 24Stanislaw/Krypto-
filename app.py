@@ -136,8 +136,8 @@ def fetch_technical_analysis():
             if len(df) < 12:
                 continue
                 
-            price = df['close'].iloc[-1]
-            prev_price = df['close'].iloc[0] if len(df) < 24 else df['close'].iloc[-24]
+            price = float(df['close'].iloc[-1])
+            prev_price = float(df['close'].iloc[0] if len(df) < 24 else df['close'].iloc[-24])
             change_24h = ((price - prev_price) / prev_price) * 100
             
             delta = df['close'].diff()
@@ -179,7 +179,7 @@ def fetch_technical_analysis():
                 "Wolumen (x)": f"{round(vol_surge, 1)}x", "Vol_Surge_Raw": vol_surge, "ATR": fmt(atr),
                 "SL (ATR)": fmt(sl), "Wsparcie": fmt(support), "Opór": fmt(resistance), "R:R": f"1:{rr_val}",
                 "Szansa (%)": f"{chance}%", "Atrakcyjność (%)": okazja_str, "RawScore": okazja_score,
-                "Price_Raw": price, "EMA200_Raw": ema200, "BTC_D1_Price": btc_d1_price, "BTC_D1_EMA200": btc_d1_ema200
+                "Price_Raw": float(price), "EMA200_Raw": float(ema200), "BTC_D1_Price": btc_d1_price, "BTC_D1_EMA200": btc_d1_ema200
             })
             loaded_count += 1
         except Exception:
@@ -230,15 +230,15 @@ def run_predictions(df_ta, fng_val):
     return df_ml[["Token", "Cena ($)", "Prognoza ML (24h)", "Zasięg Monte Carlo (95%)", "Zasięg Opcji DVOL (95%)", "Implikowana Zmienność (IV)", "Prawdopodobieństwo", "Sygnał Hybrydowy"]]
 
 # ==========================================
-# HISTORIA I BACKTEST (BEZ DUPLIKATÓW)
+# HISTORIA I BACKTEST (30 DNI LUB TP/SL)
 # ==========================================
 HISTORY_FILE = "signals_history.csv"
 
-def log_signals_to_history(df_ml):
+def log_signals_to_history(df_ml, df_ta):
     if df_ml.empty or "Sygnał Hybrydowy" not in df_ml.columns: 
         return
     
-    now_str = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
+    now_full = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
     existing_rows = []
     if os.path.exists(HISTORY_FILE):
         try:
@@ -247,34 +247,45 @@ def log_signals_to_history(df_ml):
         except Exception:
             pass
 
+    price_map = dict(zip(df_ta["Token"], df_ta["Price_Raw"]))
+    
+    # Sprawdzamy, które pozycje są obecnie OTWARTE (czyli trwają krócej niż 30 dni i nie uderzyły w TP/SL na poziomie ±5%)
+    active_tokens = set()
+    for row in existing_rows:
+        token = row["Token"]
+        entry = float(row["Cena Wejścia"])
+        start_date = pd.to_datetime(row["Data"])
+        days_passed = (pd.Timestamp.now() - start_date).days
+        
+        curr = float(price_map.get(token, entry))
+        change_pct = ((curr - entry) / entry) * 100
+        
+        is_closed = (days_passed >= 30) or (change_pct >= 5.0) or (change_pct <= -5.0)
+        if not is_closed:
+            active_tokens.add(token)
+
     new_rows = []
     for _, row in df_ml.iterrows():
         sig = row["Sygnał Hybrydowy"]
         if "KUP" in sig or "SPRZEDAJ" in sig:
-            try: 
-                price_clean = float(str(row["Cena ($)"]).replace("$", "").replace(",", ""))
-            except: 
-                continue
             token = row["Token"]
-            
-            exists_already = any(
-                str(o.get("Token")) == str(token) and 
-                str(o.get("Typ Sygnału")) == str(sig) and 
-                str(o.get("Data"))[:16] == now_str[:16] 
-                for o in existing_rows
-            )
-            
-            if not exists_already:
-                new_rows.append({"Data": now_str, "Token": token, "Typ Sygnału": sig, "Cena Wejścia": price_clean})
+            # Zapisz tylko wtedy, gdy ten token NIE ma obecnie aktywnej pozycji w historii
+            if token not in active_tokens:
+                try: 
+                    price_clean = float(str(row["Cena ($)"]).replace("$", "").replace(",", ""))
+                except: 
+                    continue
+                
+                new_rows.append({"Data": now_full, "Token": token, "Typ Sygnału": sig, "Cena Wejścia": price_clean})
+                active_tokens.add(token) # Blokada przed zdublowaniem w tej samej sesji
                 
     if new_rows:
         df_new = pd.DataFrame(new_rows)
         if os.path.exists(HISTORY_FILE) and existing_rows:
             combined_df = pd.concat([pd.DataFrame(existing_rows), df_new])
-            combined_df = combined_df.drop_duplicates(subset=["Data", "Token", "Typ Sygnału"], keep="first")
             combined_df.to_csv(HISTORY_FILE, index=False)
         else:
-            df_new.drop_duplicates(subset=["Data", "Token", "Typ Sygnału"], keep="first").to_csv(HISTORY_FILE, index=False)
+            df_new.to_csv(HISTORY_FILE, index=False)
 
 def get_backtest_stats(df_current_prices, target_pct=5.0):
     if not os.path.exists(HISTORY_FILE): return pd.DataFrame(), 0, 0, 0.0
@@ -287,19 +298,31 @@ def get_backtest_stats(df_current_prices, target_pct=5.0):
     
     for _, row in df_hist.iterrows():
         token, entry, sig_type = row["Token"], float(row["Cena Wejścia"]), row["Typ Sygnału"]
-        curr = price_map.get(token, entry)
+        curr = float(price_map.get(token, entry))
         change_pct = ((curr - entry) / entry) * 100
         
-        status = f"✅ TP (+{target_pct}%)" if change_pct >= target_pct else (f"❌ SL (-{target_pct}%)" if change_pct <= -target_pct else "🔄 W toku (Spot)")
-        if status.startswith("✅"): wins += 1
-        total += 1
+        start_date = pd.to_datetime(row["Data"])
+        days_passed = (pd.Timestamp.now() - start_date).days
+        
+        if change_pct >= target_pct:
+            status = f"✅ TP (+{target_pct}%)"
+            wins += 1
+            total += 1
+        elif change_pct <= -target_pct:
+            status = f"❌ SL (-{target_pct}%)"
+            total += 1
+        elif days_passed >= 30:
+            status = "⏱️ Wygasło (30 dni)"
+            total += 1
+        else:
+            status = f"🔄 W toku ({days_passed}/30 dni)"
         
         results.append({"Data": row["Data"], "Token": token, "Sygnał": sig_type, "Cena Wejścia ($)": fmt(entry), "Cena Obecna ($)": fmt(curr), "Wynik (%)": round(change_pct, 2), "Status": status})
         
     return pd.DataFrame(results), total, wins, (round((wins / total) * 100, 1) if total > 0 else 0.0)
 
 # ==========================================
-# ROZBUDOWANY RAPORT AI Z WYJAŚNIENIAMI I PIGUŁKĄ
+# RAPORT AI
 # ==========================================
 def generuj_raport_ai(row_ta, row_ml=None):
     symbol = row_ta.get("Token")
@@ -314,21 +337,7 @@ def generuj_raport_ai(row_ta, row_ml=None):
     sl_str = row_ta.get("SL (ATR)")
     rr = row_ta.get("R:R")
     
-    trend_desc = "wzrostowym (Cena powyżej średniej EMA 200 – długoterminowy trend byczy)" if price_raw > ema_raw else "spadkowym/bocznym (Cena poniżej średniej EMA 200 – dominacja niedźwiedzi)"
-    
-    if rsi < 30:
-        rsi_opis = f"**{rsi} (Głębokie Wyprzedanie)** – rynek jest mocno przeceniony, rośnie szansa na silne odbicie techniczne."
-    elif rsi > 70:
-        rsi_opis = f"**{rsi} (Głębokie Wykupienie)** – aktywo jest drogie, wysokie ryzyko realizacji zysków i korekty."
-    else:
-        rsi_opis = f"**{rsi} (Strefa Neutralna)** – brak ekstremów, zdrowa równowaga popytu i podaży."
-
-    if pct_b < 0.1:
-        bb_opis = f"**{pct_b:.2f} (Dolna Banda Bollingera)** – cena testuje lub przebija dolne ograniczenie zmienności."
-    elif pct_b > 0.9:
-        bb_opis = f"**{pct_b:.2f} (Górna Banda Bollingera)** – cena testuje sufit zmienności."
-    else:
-        bb_opis = f"**{pct_b:.2f} (Środek Kanału)** – cena wewnątrz standardowego pasma zmienności."
+    trend_desc = "wzrostowym (Cena powyżej EMA 200)" if price_raw > ema_raw else "spadkowym/bocznym (Cena poniżej EMA 200)"
 
     prob_str, prognoza_ml, zasieg_mc, signal = "50.0%", "-", "-", "⏳ CZEKAJ"
     if row_ml is not None:
@@ -342,50 +351,22 @@ def generuj_raport_ai(row_ta, row_ml=None):
     except:
         prob_val = 50.0
 
-    if "KUP (Mocny)" in signal or prob_val >= 55.0:
-        decyzja = "🟢 **AKUMULUJ / KUPUJ**"
-        rekomendacja_tekst = "Kryteria techniczne oraz symulacje wskazują na przewagę kupujących."
-    elif "KUP (Słaby)" in signal or (50.0 <= prob_val < 55.0):
-        decyzja = "🟡 **OSTROŻNA AKUMULACJA (DCA)**"
-        rekomendacja_tekst = "Sytuacja mieszana – rozważ mniejsze transakcje metodą DCA."
-    elif "SPRZEDAJ" in signal or prob_val < 42.0:
-        decyzja = "🔴 **REDUKUJ / SPRZEDAJ**"
-        rekomendacja_tekst = "Słabe wskaźniki momentum – rozważ realizację zysków."
-    else:
-        decyzja = "⏳ **WSTRZYMAJ SIĘ / CZEKAJ**"
-        rekomendacja_tekst = "Brak wyraźnego sygnału kierunkowego."
-
     return f"""
-### 📑 SZCZEGÓŁOWY RAPORT ANALITYCZNY AI: {symbol} (${price_str})
-
-#### 1. Analiza Trendu i Struktury Rynkowej
-* **Zmiana 24h:** `{change_24h}%` | **Trend długoterminowy (EMA 200):** {trend_desc}
-* **Co to oznacza?** Średnia EMA 200 odzwierciedla główny kierunek rynkowy (powyżej = hossa, poniżej = bessa).
-
-#### 2. Głęboka Analiza Wskaźników Technicznych
-* **Momentum (RSI):** {rsi_opis}
-* **Wstęgi Bollingera (%B):** {bb_opis}
-* **Poziomy Krytyczne:** Wsparcie na **${support_str}**, Opór na **${resistance_str}**.
-
-#### 3. Prognoza Modeli Matematycznych & Monte Carlo
-* **Prognozowana cena (24h):** {prognoza_ml} 
-* **Przedział ufności Monte Carlo (95%):** {zasieg_mc}
-
----
-### 💊 PIGUŁKA WYNIKÓW I REKOMENDACJA PRZYSZŁOŚCI
-* **Sugerowana akcja:** {decyzja}
-* **Szansa na powodzenie:** **{prob_val}%**
-* **Stosunek Zysku do Ryzyka (R:R):** `{rr}` | **Zalecany Stop Loss:** `${sl_str}`
-* **Perspektywa przyszłości:** {rekomendacja_tekst}
+### 📑 RAPORT AI: {symbol} (${price_str}, Zmiana 24h: {change_24h}%)
+* **Trend strukturalny:** {trend_desc}
+* **Momentum (RSI):** {rsi} | **Wstęgi Bollingera (%B):** {pct_b:.2f}
+* **Prognoza ML (24h):** {prognoza_ml} | **Szansa na sukces:** **{prob_val}%**
+* **Poziomy krytyczne:** Wsparcie: `${support_str}` | Opór: `${resistance_str}` | Stop Loss: `${sl_str}`
+* **R:R:** `{rr}` | **Sygnał:** {signal}
 """
 
 # ==========================================
 # INTERFEJS GŁÓWNY (UI)
 # ==========================================
-with st.spinner("🔄 Pobieram dane rynkowe i analizuję rynek..."):
+with st.spinner("🔄 Pobieram dane rynkowe..."):
     df_ta, fng_val, fng_class, btc_dom, btc_d1_p, btc_d1_e, loaded_c, total_c = fetch_technical_analysis()
     df_ml = run_predictions(df_ta, fng_val)
-    log_signals_to_history(df_ml)
+    log_signals_to_history(df_ml, df_ta)
 
 col_t, col_b, col_d, col_f = st.columns([2, 1.1, 0.9, 1])
 col_t.title("📊 Analiza Krypto")
@@ -400,7 +381,7 @@ col_d.metric("Dominacja BTC", f"{btc_dom}%")
 col_f.metric("Fear & Greed", f"{fng_val}/100", fng_class)
 
 # ==========================================
-# STRATEGICZNE PODSUMOWANIE SPOT (KAFELKI)
+# STRATEGICZNE PODSUMOWANIE SPOT
 # ==========================================
 if not df_ml.empty and "Sygnał Hybrydowy" in df_ml.columns:
     st.markdown("---")
@@ -411,39 +392,32 @@ if not df_ml.empty and "Sygnał Hybrydowy" in df_ml.columns:
     sprzedaz = df_ml[df_ml["Sygnał Hybrydowy"].str.contains("SPRZEDAJ", na=False)]["Token"].tolist()
     
     c_kafl1, c_kafl2, c_kafl3 = st.columns(3)
-    
     with c_kafl1:
-        tokens_str = ", ".join(mocne_kup) if mocne_kup else "Brak"
-        st.success(f"🟢 **Mocna Akumulacja Spot**\n\n**Tokeny:** {tokens_str}\n\nPotrójne potwierdzenie: wysoka szansa wzrostu, poprawny wolumen i sprzyjający trend.")
+        st.success(f"🟢 **Mocna Akumulacja Spot**\n\n**Tokeny:** {', '.join(mocne_kup) if mocne_kup else 'Brak'}\n\nWysoka szansa wzrostu i poprawny wolumen.")
     with c_kafl2:
-        tokens_str = ", ".join(slabe_kup) if slabe_kup else "Brak"
-        st.warning(f"📈 **Ostrożne Wejście (DCA)**\n\n**Tokeny:** {tokens_str}\n\nRozważ zakup hybrydowy lub mniejsze transakcje metodą DCA ze względu na mieszane warunki.")
+        st.warning(f"📈 **Ostrożne Wejście (DCA)**\n\n**Tokeny:** {', '.join(slabe_kup) if slabe_kup else 'Brak'}\n\nRozważ mniejsze zakupy metodą DCA.")
     with c_kafl3:
-        tokens_str = ", ".join(sprzedaz) if sprzedaz else "Brak"
-        st.error(f"🔴 **Realizacja Zysków**\n\n**Tokeny:** {tokens_str}\n\nPrzegrzane wskaźniki – dobra chwila na rozważenie sprzedaży częściowej lub całościowej pozycji spot.")
-
-if not df_ta.empty:
-    st.markdown("---")
-    sel_token = st.selectbox("📱 Szybki podgląd tokena:", df_ta["Token"].tolist())
-    t_row = df_ta[df_ta["Token"] == sel_token].iloc[0]
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Cena Spot", t_row["Cena ($)"])
-    m2.metric("Zmiana 24h", f"{t_row['24h (%)']}%")
-    m3.metric("RSI (14)", t_row["RSI"])
-    m4.metric("Atrakcyjność", t_row["Atrakcyjność (%)"])
-    m5.metric("Sugerowany SL", t_row["SL (ATR)"])
+        st.error(f"🔴 **Realizacja Zysków**\n\n**Tokeny:** {', '.join(sprzedaz) if sprzedaz else 'Brak'}\n\nPrzegrzane wskaźniki – rozważ redukcję pozycji.")
 
 st.markdown("---")
-if st.button("🔄 Odśwież dane rynkowe", type="primary"):
-    st.cache_data.clear()
-    st.rerun()
+col_btn1, col_btn2 = st.columns([1, 4])
+with col_btn1:
+    if st.button("🔄 Odśwież dane", type="primary"):
+        st.cache_data.clear()
+        st.rerun()
+with col_btn2:
+    if st.button("🗑️ Wyczyść historię sygnałów"):
+        if os.path.exists(HISTORY_FILE):
+            os.remove(HISTORY_FILE)
+            st.success("Wyczyszczono plik historii!")
+            st.rerun()
 
 df_ta_clean = df_ta.drop(columns=["RawScore", "Vol_Surge_Raw", "Price_Raw", "EMA200_Raw", "BTC_D1_Price", "BTC_D1_EMA200"], errors="ignore")
 
 tab1, tab2, tab3, tab4 = st.tabs(["1. Tabela Techniczna", "2. Sygnały Hybrydowe", "3. Backtest", "4. Archiwum"])
 
 with tab1:
-    st.dataframe(df_ta_clean.style.map(lambda v: 'color: #2e7d32; font-weight: bold;' if isinstance(v, (int, float)) and v > 0 else ('color: #c62828; font-weight: bold;' if isinstance(v, (int, float)) and v < 0 else ''), subset=['24h (%)']), use_container_width=True)
+    st.dataframe(df_ta_clean, use_container_width=True)
 
 with tab2:
     st.dataframe(df_ml, use_container_width=True)
@@ -455,22 +429,19 @@ with tab3:
     bt_df, tot, wins, wr = get_backtest_stats(df_ta, t_val)
     if tot > 0:
         k1, k2, k3 = st.columns(3)
-        k1.metric("Sygnały", tot)
+        k1.metric("Zamknięte Sygnały", tot)
         k2.metric("Wygrane (TP)", wins)
         k3.metric("Win Rate", f"{wr}%")
         st.dataframe(bt_df, use_container_width=True)
     else:
-        st.info("Brak zapisanej historii.")
+        st.info("Brak zamkniętych sygnałów w historii (pozycje są w toku lub wyczyściłeś plik).")
 
 with tab4:
-    st.subheader("🗂️ Archiwum Sygnałów (Unikalne Wpisy)")
+    st.subheader("🗂️ Archiwum Sygnałów")
     if os.path.exists(HISTORY_FILE):
         df_hist = pd.read_csv(HISTORY_FILE)
         if not df_hist.empty:
-            df_hist_unique = df_hist.drop_duplicates(subset=["Data", "Token", "Typ Sygnału"]).sort_values(by="Data", ascending=False)
-            st.dataframe(df_hist_unique, use_container_width=True)
-            with open(HISTORY_FILE, "rb") as f:
-                st.download_button("📥 Pobierz archiwum (CSV)", f, "archiwum.csv", "text/csv")
+            st.dataframe(df_hist.sort_values(by="Data", ascending=False), use_container_width=True)
         else:
             st.info("Archiwum jest puste.")
     else:
@@ -479,5 +450,5 @@ with tab4:
 if not df_ta.empty:
     st.divider()
     st.subheader("🤖 Rozbudowany Raport Analityczny AI")
-    sel_ai = st.selectbox("Wybierz token do pełnego raportu opisowego:", df_ta["Token"].tolist(), key="ai_box")
+    sel_ai = st.selectbox("Wybierz token do pełnego raportu:", df_ta["Token"].tolist(), key="ai_box")
     st.markdown(generuj_raport_ai(df_ta[df_ta["Token"] == sel_ai].iloc[0], df_ml[df_ml["Token"] == sel_ai].iloc[0] if not df_ml.empty else None))
