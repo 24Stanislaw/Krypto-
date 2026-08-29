@@ -310,7 +310,7 @@ def run_predictions(df_ta, fng_val):
     return df_ml[["Token", "Cena ($)", "Prognoza ML (24h)", "Zasięg Monte Carlo (95%)", "Zasięg Opcji DVOL (95%)", "Implikowana Zmienność (IV)", "Prawdopodobieństwo", "Sygnał Hybrydowy"]]
 
 # ==========================================
-# MODUŁ ŚLEDZENIA SKUTECZNOŚCI (BACKTEST)
+# MODUŁ ŚLEDZENIA SKUTECZNOŚCI (SPOT BACKTEST ±5%, ±7.5%, ±10%)
 # ==========================================
 HISTORY_FILE = "signals_history.csv"
 
@@ -333,8 +333,7 @@ def log_signals_to_history(df_ml):
                 "Data": now_str,
                 "Token": row["Token"],
                 "Typ Sygnału": sig,
-                "Cena Wejścia": price_clean,
-                "Cena Aktualna": price_clean
+                "Cena Wejścia": price_clean
             })
             
     if not new_rows:
@@ -345,7 +344,6 @@ def log_signals_to_history(df_ml):
     if os.path.exists(HISTORY_FILE):
         try:
             df_old = pd.read_csv(HISTORY_FILE)
-            # Zapisujemy tylko unikalne wpisy z danego dnia/godziny dla tokena, żeby nie spamować
             combined = pd.concat([df_old, df_new]).drop_duplicates(subset=["Data", "Token", "Typ Sygnału"], keep="last")
             combined.to_csv(HISTORY_FILE, index=False)
         except Exception:
@@ -353,7 +351,7 @@ def log_signals_to_history(df_ml):
     else:
         df_new.to_csv(HISTORY_FILE, index=False)
 
-def get_backtest_stats(df_current_prices):
+def get_backtest_stats(df_current_prices, target_pct=5.0):
     if not os.path.exists(HISTORY_FILE):
         return pd.DataFrame(), 0, 0, 0.0
         
@@ -375,17 +373,40 @@ def get_backtest_stats(df_current_prices):
         token = row["Token"]
         entry_price = float(row["Cena Wejścia"])
         sig_type = row["Typ Sygnału"]
+        signal_date = pd.to_datetime(row["Data"])
         
         current_price = price_map.get(token, entry_price)
         change_pct = ((current_price - entry_price) / entry_price) * 100
         
-        # Ocena sukcesu: dla KUP chcemy wzrostu, dla SPRZEDAJ spadku
+        # Symulacja Spot z wybranym progiem (np. 5%, 7.5%, 10%)
+        # Sprawdzamy czy osiągnęło cel TP (+target_pct) lub SL (-target_pct) w horyzoncie 30 dni
+        days_passed = (pd.Timestamp.now() - signal_date).days
+        
         if "KUP" in sig_type:
-            is_win = change_pct > 0
-        else:
-            is_win = change_pct < 0
-            
-        if is_win:
+            if change_pct >= target_pct:
+                status = f"✅ TP (+{target_pct}%)"
+                is_win = True
+            elif change_pct <= -target_pct:
+                status = f"❌ SL (-{target_pct}%)"
+                is_win = False
+            elif days_passed > 30:
+                status = "⏳ Wygasło (30 dni)"
+                is_win = change_pct > 0
+            else:
+                status = "🔄 W toku (Spot)"
+                is_win = change_pct >= 0
+        else: # Dla sygnałów sprzedaży
+            if change_pct <= -target_pct:
+                status = f"✅ TP (+{target_pct}%)"
+                is_win = True
+            elif change_pct >= target_pct:
+                status = f"❌ SL (-{target_pct}%)"
+                is_win = False
+            else:
+                status = "🔄 W toku (Spot)"
+                is_win = change_pct <= 0
+                
+        if status.startswith("✅"):
             wins += 1
         total += 1
         
@@ -396,7 +417,7 @@ def get_backtest_stats(df_current_prices):
             "Cena Wejścia ($)": fmt(entry_price),
             "Cena Obecna ($)": fmt(current_price),
             "Wynik (%)": round(change_pct, 2),
-            "Status": "✅ Trafiony" if is_win else "❌ Stratny"
+            "Status": status
         })
         
     win_rate = round((wins / total) * 100, 1) if total > 0 else 0.0
@@ -414,43 +435,31 @@ def generuj_raport_ai(row_ta, row_ml=None):
     support_str = str(row_ta.get("Wsparcie", "-"))
     resistance_str = str(row_ta.get("Opór", "-"))
     rr = str(row_ta.get("R:R", "-"))
-    vol_str = str(row_ta.get("Wolumen (x)", "1.0x"))
     change_24h = row_ta.get("24h (%)", 0.0)
     ema200_val = row_ta.get("EMA200_Raw", 0.0)
-    pct_b = float(row_ta.get("%B (BB)", 0.5))
 
     if isinstance(price_val, (float, int)) and isinstance(ema200_val, (float, int)) and ema200_val > 0:
-        trend_desc = "wzrostowym (cena znajduje się powyżej kluczowej średniej EMA 200, co historycznie faworyzuje długie pozycje)" if price_val > ema200_val else "spadkowym (cena poniżej EMA 200 generuje techniczną presję podażową)"
+        trend_desc = "wzrostowym (cena znajduje się powyżej kluczowej średniej EMA 200)" if price_val > ema200_val else "spadkowym (cena poniżej EMA 200)"
     else:
-        trend_desc = "bocznym lub brakuje wyraźnego potwierdzenia kierunku"
+        trend_desc = "bocznym"
 
     if rsi < 30:
-        rsi_desc = f"na ekstremalnie niskim poziomie **{rsi}**. Świadczy to o głębokim wyprzedaniu i potencjalnej rynkowej panice."
+        rsi_desc = f"na ekstremalnie niskim poziomie **{rsi}** (wyprzedanie)."
     elif rsi > 70:
-        rsi_desc = f"na podwyższonym poziomie **{rsi}**. Rynek jest aktualnie mocno wykupiony, rośnie ryzyko korekty."
+        rsi_desc = f"na podwyższonym poziomie **{rsi}** (wykupienie)."
     else:
         rsi_desc = f"na zrównoważonym poziomie **{rsi}**."
 
-    prog, mc, iv, prob, signal = "-", "-", "-", "-", "-"
+    prob, signal = "-", "-"
     prob_num = 50.0
     
     if row_ml is not None:
-        prog = str(row_ml.get("Prognoza ML (24h)", "-"))
-        mc = str(row_ml.get("Zasięg Monte Carlo (95%)", "-"))
-        iv = str(row_ml.get("Implikowana Zmienność (IV)", "-"))
         prob = str(row_ml.get("Prawdopodobieństwo", "-"))
         signal = str(row_ml.get("Sygnał Hybrydowy", "-"))
         try:
             prob_num = float(prob.replace("%", ""))
         except Exception:
             pass
-
-    if prob_num > 55:
-        scenariusz = f"Najbardziej prawdopodobnym wydarzeniem jest **zdecydowany atak kapitału w kierunku oporu ${resistance_str}**."
-    elif prob_num < 45:
-        scenariusz = f"Najbardziej realistycznym wariantem jest **dalsze osuwanie się kursu i test wsparcia ${support_str}**."
-    else:
-        scenariusz = f"Kurs najpewniej utknie w **bocznym przedziale ({mc})**."
 
     pewnosc = max(prob_num, 100 - prob_num)
     if "KUP (Mocny)" in signal:
@@ -468,18 +477,13 @@ Trend strukturalny: **{trend_desc}**
 
 * **Momentum (RSI):** {rsi_desc}
 * **Prawdopodobieństwo Sukcesu:** **{prob}**
-* **Zasięg Symulacji (Monte Carlo):** {mc}
-
----
-🔮 **NAJBARDZIEJ PRAWDOPODOBNA PRZYSZŁOŚĆ**
-{scenariusz}
 
 ---
 💡 **WERDYKT I REKOMENDACJA**
 * **Decyzja:** {decyzja}
 * **Pewność Sygnału:** **{pewnosc:.1f}%**
 * **Stosunek Zysku do Ryzyka (R:R):** {rr}
-* **Wymagany Stop Loss:** Ustaw bezwzględnie na poziomie **${sl_str}**.
+* **Wymagany Stop Loss (ATR):** Ustaw na poziomie **${sl_str}**.
 """
 
 # ==========================================
@@ -524,7 +528,7 @@ if st.button("🔄 Odśwież dane rynkowe", type="primary"):
     st.rerun()
 
 df_ml = run_predictions(df_ta, fng_val)
-log_signals_to_history(df_ml) # Automatyczny zapis sygnałów do bintestu
+log_signals_to_history(df_ml)
 
 df_ta_clean = df_ta.drop(columns=["RawScore", "Vol_Surge_Raw", "Price_Raw", "EMA200_Raw", "BTC_D1_Price", "BTC_D1_EMA200"], errors="ignore")
 
@@ -538,15 +542,19 @@ with tab2:
     st.dataframe(df_ml, use_container_width=True)
 
 with tab3:
-    st.subheader("📈 Analiza Historyczna Skuteczności Sygnałów")
-    st.caption("Modulator weryfikuje, jak wygenerowane wcześniej sygnały radzą sobie w zetknięciu z aktualnymi cenami rynkowymi.")
+    st.subheader("📈 Analiza Historyczna Skuteczności (Spot)")
+    st.caption("Wybierz próg docelowy zysku i straty (TP / SL), aby sprawdzić jak model radzi sobie na rynku spot w horyzoncie do 30 dni.")
     
-    bt_df, total_sigs, win_sigs, win_rate = get_backtest_stats(df_ta)
+    # Wybór progów: 5%, 7.5%, 10%
+    target_choice = st.radio("Wybierz próg testowy:", ["5%", "7.5%", "10%"], horizontal=True, index=0)
+    target_val = 5.0 if target_choice == "5%" else (7.5 if target_choice == "7.5%" else 10.0)
+    
+    bt_df, total_sigs, win_sigs, win_rate = get_backtest_stats(df_ta, target_pct=target_val)
     
     if total_sigs > 0:
         k1, k2, k3 = st.columns(3)
         k1.metric("Łącznie Sygnałów", total_sigs)
-        k2.metric("Trafione Sygnały", win_sigs)
+        k2.metric("Osiągnęło Cel (TP)", win_sigs)
         k3.metric("Skuteczność (Win Rate)", f"{win_rate}%")
         
         st.markdown("---")
@@ -590,13 +598,13 @@ if not df_ml.empty and "Sygnał Hybrydowy" in df_ml.columns:
     with c2:
         st.markdown("### 📈 Ostrożne Wejście (DCA)")
         if weak_buys:
-            st.warning(f"**Tokeny:** {', '.join(weak_buys)}\n\nRozważ zakup hybrydowy lub mniejsze transakcje metodą DCA ze względu na mieszane warunki wolumenowe.")
+            st.warning(f"**Tokeny:** {', '.join(weak_buys)}\n\nRozważ zakup hybrydowy lub mniejsze transakcje metodą DCA ze względu na mieszane warunki.")
         else:
             st.info("Brak tokenów w strefie ostrożnej akumulacji.")
 
     with c3:
         st.markdown("### 🔴 Realizacja Zysków")
         if sells:
-            st.error(f"**Tokeny:** {', '.join(sells)}\n\nPrzegrzane wskaźniki – dobra chwila na rozważenie sprzedaży częściowej lub całościowej pozycji spot.")
+            st.error(f"**Tokeny:** {', '.join(sells)}\n\nPrzegrzane wskaźniki – dobra chwila na rozważenie częściowej sprzedaży.")
         else:
             st.success("Brak sygnałów pilnej wyprzedaży.")
