@@ -193,6 +193,14 @@ def calc_rsi(series, period=14):
     val = 100 - (100 / (1 + (gain.iloc[-1] / (loss.iloc[-1] + 1e-9))))
     return float(val) if not pd.isna(val) else 50.0
 
+def calc_macd(series, span1=12, span2=26, signal=9):
+    exp1 = series.ewm(span=span1, adjust=False).mean()
+    exp2 = series.ewm(span=span2, adjust=False).mean()
+    macd_line = exp1 - exp2
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return float(macd_line.iloc[-1]), float(signal_line.iloc[-1]), float(histogram.iloc[-1])
+
 @st.cache_data(ttl=300)
 def fetch_technical_analysis():
     data = []
@@ -222,6 +230,8 @@ def fetch_technical_analysis():
             rsi_4h = calc_rsi(df_4h['close']) if len(df_4h) >= 14 else 50.0
             rsi_12h = calc_rsi(df_12h['close']) if len(df_12h) >= 14 else 50.0
 
+            macd_val, macd_sig, macd_hist = calc_macd(df_4h['close']) if len(df_4h) >= 26 else (0.0, 0.0, 0.0)
+
             tr = pd.concat([df_4h['high'] - df_4h['low'], (df_4h['high'] - df_4h['close'].shift()).abs(), (df_4h['low'] - df_4h['close'].shift()).abs()], axis=1).max(axis=1) if len(df_4h) > 1 else pd.Series([price * 0.02])
             atr = float(tr.rolling(min(14, len(df_4h))).mean().iloc[-1]) if len(tr) > 0 else price * 0.02
             ema200_4h = float(df_4h['close'].ewm(span=min(200, len(df_4h)), adjust=False).mean().iloc[-1]) if len(df_4h) > 0 else price
@@ -239,14 +249,15 @@ def fetch_technical_analysis():
             if rsi_2h <= 48: mtf_score += 1
             if rsi_4h <= 52: mtf_score += 1
             if rsi_12h <= 55: mtf_score += 1
+            if macd_hist > 0: mtf_score += 1  # Dodatkowe wzmocnienie za MACD Histogram
 
-            okazja_score = round(min(max((mtf_score * 20.0) + (50 - rsi_4h) * 0.5 + (10.0 if price > ema200_4h else 0), 10.0), 99.0), 1)
+            okazja_score = round(min(max((mtf_score * 16.5) + (50 - rsi_4h) * 0.5 + (10.0 if price > ema200_4h else 0), 10.0), 99.0), 1)
             okazja_str = f"🔥 {okazja_score}%" if okazja_score >= 70.0 else (f"👀 {okazja_score}%" if okazja_score >= 50.0 else f"⚪ {okazja_score}%")
 
             data.append({
                 "Token": symbol, "Cena ($)": fmt(price), "24h (%)": round(change_24h, 2),
-                "RSI 1H": round(rsi_1h, 1), "RSI 2H": round(rsi_2h, 1), "RSI 4H": round(rsi_4h, 1), "RSI 12H": round(rsi_12h, 1),
-                "MTF Zgoda": f"{mtf_score}/4", "EMA 200 (4H)": fmt(ema200_4h), "ATR": fmt(atr),
+                "RSI 1H": round(rsi_1h, 1), "RSI 4H": round(rsi_4h, 1), "RSI 12H": round(rsi_12h, 1),
+                "MACD Hist (4H)": fmt(macd_hist), "MTF Zgoda": f"{mtf_score}/5", "EMA 200 (4H)": fmt(ema200_4h), "ATR": fmt(atr),
                 "SL (ATR)": fmt(sl), "Wsparcie": fmt(support), "Opór": fmt(resistance), "R:R": f"1:{rr_val}",
                 "Atrakcyjność (%)": okazja_str, "RawScore": okazja_score, "Price_Raw": float(price), "EMA200_Raw": float(ema200_4h),
                 "RSI_1H_Raw": float(rsi_1h), "RSI_4H_Raw": float(rsi_4h), "RSI_12H_Raw": float(rsi_12h), "MTF_Score": mtf_score
@@ -256,8 +267,8 @@ def fetch_technical_analysis():
             p, chg = get_simple_coingecko_price(gecko_id)
             data.append({
                 "Token": symbol, "Cena ($)": fmt(p), "24h (%)": round(chg, 2),
-                "RSI 1H": 50.0, "RSI 2H": 50.0, "RSI 4H": 50.0, "RSI 12H": 50.0,
-                "MTF Zgoda": "2/4", "EMA 200 (4H)": fmt(p), "ATR": fmt(p * 0.02),
+                "RSI 1H": 50.0, "RSI 4H": 50.0, "RSI 12H": 50.0,
+                "MACD Hist (4H)": "0.0", "MTF Zgoda": "2/5", "EMA 200 (4H)": fmt(p), "ATR": fmt(p * 0.02),
                 "SL (ATR)": fmt(p * 0.96), "Wsparcie": fmt(p * 0.95), "Opór": fmt(p * 1.05), "R:R": "1:1.5",
                 "Atrakcyjność (%)": "⚪ 50.0%", "RawScore": 50.0, "Price_Raw": p, "EMA200_Raw": p,
                 "RSI_1H_Raw": 50.0, "RSI_4H_Raw": 50.0, "RSI_12H_Raw": 50.0, "MTF_Score": 2
@@ -394,7 +405,7 @@ def update_and_log_history(df_ml, df_ta):
             sig, token = str(row["Sygnał Hybrydowy"]), row["Token"]
             curr_rsi_1h = rsi_1h_map.get(token, 50.0)
             
-            is_kup = "🟢 KUP" in sig
+            is_kup = "🟢 KUP" in sig or "📈 KUP" in sig
             is_sprzedaj = "🔴 SPRZEDAJ" in sig
             
             hours_since = (now_dt - last_signal_time[token]).total_seconds() / 3600.0 if token in last_signal_time else 999.0
@@ -480,6 +491,7 @@ def generuj_raport_ai(row_ta, row_ml=None):
     rsi_1h = float(row_ta.get("RSI_1H_Raw", 50))
     rsi_4h = float(row_ta.get("RSI_4H_Raw", 50))
     rsi_12h = float(row_ta.get("RSI_12H_Raw", 50))
+    macd_hist = row_ta.get("MACD Hist (4H)")
     mtf_score = row_ta.get("MTF Zgoda")
     change_24h = row_ta.get("24h (%)")
     support_str = row_ta.get("Wsparcie")
@@ -508,13 +520,12 @@ def generuj_raport_ai(row_ta, row_ml=None):
 
 #### 1. 📌 Podsumowanie i MTF Konsensus
 * **Status Sygnału:** **{signal}**
-* **Zgoda Multi-Timeframe:** `{mtf_score}` (Punkty schłodzenia na interwałach 1H-12H)
+* **Zgoda Multi-Timeframe:** `{mtf_score}` (Uwzględnia RSI oraz MACD Hist)
 * **Struktura Rynku:** Token znajduje się w trendzie **{trend_status}**.
 
-#### 2. 📊 Układ Wskaźników RSI
-* **RSI 1H:** `{rsi_1h}` (Reakcja na żywo)
-* **RSI 4H:** `{rsi_4h}` (Momentum średnioterminowe)
-* **RSI 12H:** `{rsi_12h}` (Główny filtr kierunkowy)
+#### 2. 📊 Układ Wskaźników Technicznych (RSI & MACD)
+* **RSI 1H:** `{rsi_1h}` | **RSI 4H:** `{rsi_4h}` | **RSI 12H:** `{rsi_12h}`
+* **MACD Histogram (4H):** `{macd_hist}`
 * **Średnia EMA 200 (4H):** `${fmt(ema_raw)}`
 
 #### 3. 🎲 Symulacja Monte Carlo (24h)
@@ -531,7 +542,7 @@ def generuj_raport_ai(row_ta, row_ml=None):
 # ==========================================
 # INTERFEJS GŁÓWNY (UI)
 # ==========================================
-with st.spinner("🔄 Pobieram dane i obliczam Multi-Timeframe (1H, 2H, 4H, 12H)..."):
+with st.spinner("🔄 Pobieram dane i obliczam Multi-Timeframe (1H, 2H, 4H, 12H z MACD)..."):
     df_ta, fng_val, fng_class, btc_dom, alt_season, loaded_c, total_c = fetch_technical_analysis()
     df_ml = run_predictions(df_ta, fng_val)
     update_and_log_history(df_ml, df_ta)
