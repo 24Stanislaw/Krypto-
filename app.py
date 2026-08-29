@@ -74,16 +74,6 @@ def get_fear_and_greed():
     except Exception:
         return 50, "Neutral"
 
-def get_binance_funding(symbol):
-    try:
-        url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}USDT"
-        res = requests.get(url, timeout=3).json()
-        if 'lastFundingRate' in res:
-            return float(res['lastFundingRate']) * 100
-    except Exception:
-        pass
-    return 0.01
-
 def fetch_from_coinbase(symbol_pair, granularity=3600):
     url = f"https://api.exchange.coinbase.com/products/{symbol_pair}/candles?granularity={granularity}"
     headers = {"User-Agent": "CryptoDashboard/1.0"}
@@ -174,8 +164,6 @@ def fetch_technical_analysis():
             vol_ma = df['volume'].rolling(min(20, len(df))).mean().iloc[-1]
             vol_surge = (df['volume'].iloc[-1] / vol_ma) if vol_ma > 0 else 1.0
 
-            funding = get_binance_funding(item['symbol'])
-
             sl = price - (2 * atr)
             support = df['low'].min()
             resistance = df['high'].max()
@@ -210,7 +198,6 @@ def fetch_technical_analysis():
                 "EMA 200": fmt(ema200),
                 "Wolumen (x)": f"{round(vol_surge, 1)}x",
                 "Vol_Surge_Raw": vol_surge,
-                "Funding (%)": f"{round(funding, 4)}%",
                 "ATR": fmt(atr),
                 "SL (ATR)": fmt(sl),
                 "Wsparcie": fmt(support),
@@ -256,16 +243,14 @@ def run_predictions(df_ta, fng_val):
         change = float(row["24h (%)"])
         pct_b = float(row["%B (BB)"])
         vol_surge = float(row["Vol_Surge_Raw"])
-        funding = float(str(row["Funding (%)"]).replace('%', ''))
 
         atr_pct = (atr / price) * 100
         dynamic_rsi_thresh = 30.0 + min(max(atr_pct * 1.5, 0.0), 10.0)
 
         rsi_bounce = (dynamic_rsi_thresh - rsi) * 0.0025 if rsi < dynamic_rsi_thresh else (-(rsi - 70) * 0.0020 if rsi > 70 else 0)
         bb_bounce = (0.1 - pct_b) * 0.005 if pct_b < 0.1 else (-(pct_b - 0.9) * 0.005 if pct_b > 0.9 else 0)
-        funding_penalty = -0.003 if funding > 0.03 else (0.003 if funding < -0.01 else 0)
 
-        expected_change = (change / 100 * 0.05) + rsi_bounce + bb_bounce + funding_penalty
+        expected_change = (change / 100 * 0.05) + rsi_bounce + bb_bounce
         target_price = price * (1 + expected_change)
 
         shocks = np.random.normal(expected_change / 24.0, (atr / price) / np.sqrt(24), (10000, 24))
@@ -291,7 +276,7 @@ def run_predictions(df_ta, fng_val):
             if rsi <= 45:
                 signal = "⏳ CZEKAJ / NEUTRALNY"
             else:
-                signal = "🔴 SPRZEDAJ" if (prob < 42.0 or funding > 0.05) else "⏳ CZEKAJ / NEUTRALNY"
+                signal = "🔴 SPRZEDAJ" if prob < 42.0 else "⏳ CZEKAJ / NEUTRALNY"
 
         return pd.Series([
             f"${fmt(target_price)}",
@@ -315,7 +300,7 @@ df_ta, fng_val, fng_class, btc_d1_price, btc_d1_ema200, loaded_count, total_coun
 col_title, col_btc_macro, col_fng = st.columns([2.5, 1.2, 1])
 with col_title:
     st.title("📊 Zintegrowany Panel Analityczny Crypto Pro")
-    st.caption(f"ℹ️ Status API: Pomyślnie załadowano dane dla **{loaded_count}/{total_count}** tokenów.")
+    st.caption(f"ℹ️ Status API: Pomyślnie załadowano dane dla **{loaded_count}/{total_count}** tokenów (Źródło: Coinbase/Coingecko).")
 
 with col_btc_macro:
     if btc_d1_price and btc_d1_ema200:
@@ -333,12 +318,6 @@ if fng_val < 25:
     st.info("💡 **Wskazówka behawioralna (Ekstremalny strach):** Historycznie to najlepsze momenty na akumulację i zakupy DCA.")
 elif fng_val > 75:
     st.warning("⚠️ **Wskazówka behawioralna (Ekstremalna chciwość):** Rynek rozgrzany – zachowaj szczególną ostrożność i rozważ realizację zysków.")
-
-# Kontrola Funding Rate (Ostrzeżenie o przelewarowaniu)
-if not df_ta.empty and "Funding (%)" in df_ta.columns:
-    avg_funding = df_ta['Funding (%)'].apply(lambda x: float(str(x).replace('%', ''))).mean()
-    if avg_funding > 0.03:
-        st.warning(f"⚠️ **Ostrzeżenie o przelewarowaniu:** Średni Funding Rate wynosi {round(avg_funding, 4)}%. Wysokie ryzyko nagłych korekt (Long Squeeze).")
 
 if not df_ta.empty and "RawScore" in df_ta.columns:
     top_deals = df_ta[df_ta["RawScore"] >= 70.0]
@@ -394,7 +373,7 @@ if not df_ml.empty and "Sygnał Hybrydowy" in df_ml.columns:
         st.markdown("### 🔴 Ryzyko / Wyprzedaż")
         if sells:
             st.error(f"**Tokeny:** {', '.join(sells)}\n\n"
-                     "**Interpretacja:** Wysokie ryzyko spadku cen lub przegrzane wskaźniki (np. wysoki Funding Rate). Zalecana realizacja zysków lub ucieczka do kapitału.")
+                     "**Interpretacja:** Wysokie ryzyko spadku cen lub przegrzane wskaźniki. Zalecana realizacja zysków lub ucieczka do kapitału.")
         else:
             st.success("Brak tokenów z aktywnym sygnałem wyprzedaży.")
 
