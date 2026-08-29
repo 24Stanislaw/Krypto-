@@ -231,7 +231,7 @@ def run_predictions(df_ta, fng_val):
     return df_ml[["Token", "Cena ($)", "Symulacja Monte Carlo (24h)", "Zasięg Monte Carlo (95%)", "Zasięg Opcji DVOL (95%)", "Implikowana Zmienność (IV)", "Prawdopodobieństwo", "Sygnał Hybrydowy"]]
 
 # ==========================================
-# HISTORIA I BACKTEST (ZLECANIE WĄTKÓW TP/SL + FILTRY WEJŚCIA)
+# HISTORIA I BACKTEST (ZLECANIE WĄTKÓW TP/SL)
 # ==========================================
 HISTORY_FILE = "signals_history.csv"
 
@@ -319,11 +319,6 @@ def update_and_log_history(df_ml, df_ta):
             token = row["Token"]
             curr_rsi = rsi_map.get(token, 100.0)
             
-            # FILTRY SELEKCJI:
-            # 1. Tylko '🟢 KUP (Mocny)'
-            # 2. Token nie ma aktywnej pozycji
-            # 3. RSI po schłodzeniu (RSI <= 48)
-            # 4. Cooldown 24h od ostatniego wpisu w historii
             is_mocny_kup = "🟢 KUP (Mocny)" in sig
             is_rsi_ready = curr_rsi <= 48.0
             
@@ -382,7 +377,6 @@ def get_backtest_stats(target_pct_str):
         max_gain = ((max_p - entry) / entry) * 100 if entry > 0 else 0.0
 
         is_tp = "✅" in tp_hit
-        is_closed = is_tp or ("SL" in status) or ("Wygasło" in status) or ("Zaliczone" in status)
 
         if is_tp:
             wins += 1
@@ -412,7 +406,7 @@ def get_backtest_stats(target_pct_str):
     return pd.DataFrame(results), total, wins, win_rate
 
 # ==========================================
-# RAPORT AI
+# ROZBUDOWANY RAPORT AI
 # ==========================================
 def generuj_raport_ai(row_ta, row_ml=None):
     symbol = row_ta.get("Token")
@@ -426,27 +420,70 @@ def generuj_raport_ai(row_ta, row_ml=None):
     resistance_str = row_ta.get("Opór")
     sl_str = row_ta.get("SL (ATR)")
     rr = row_ta.get("R:R")
-    
-    trend_desc = "wzrostowym (Cena powyżej EMA 200)" if price_raw > ema_raw else "spadkowym/bocznym (Cena poniżej EMA 200)"
+    vol_surge = row_ta.get("Wolumen (x)")
 
-    prob_str, prognoza_mc, signal = "50.0%", "-", "⏳ CZEKAJ"
+    prognoza_mc, mc_range, dvol_range, iv_str, prob_str, signal = "-", "-", "-", "-", "50.0%", "⏳ CZEKAJ / NEUTRALNY"
     if row_ml is not None:
-        prognoza_mc = row_ml.get("Symulacja Monte Carlo (24h)")
-        prob_str = row_ml.get("Prawdopodobieństwo")
-        signal = row_ml.get("Sygnał Hybrydowy")
-        
-    try:
-        prob_val = float(str(prob_str).replace("%", ""))
-    except Exception:
-        prob_val = 50.0
+        prognoza_mc = row_ml.get("Symulacja Monte Carlo (24h)", "-")
+        mc_range = row_ml.get("Zasięg Monte Carlo (95%)", "-")
+        dvol_range = row_ml.get("Zasięg Opcji DVOL (95%)", "-")
+        iv_str = row_ml.get("Implikowana Zmienność (IV)", "-")
+        prob_str = row_ml.get("Prawdopodobieństwo", "50.0%")
+        signal = row_ml.get("Sygnał Hybrydowy", "⏳ CZEKAJ / NEUTRALNY")
+
+    trend_status = "🟢 Byczy (Cena powyżej EMA 200)" if price_raw > ema_raw else "🔴 Niedźwiedzi / Boczny (Cena poniżej EMA 200)"
+
+    if rsi < 35:
+        rsi_desc = "Wyprzedanie (Silna strefa okazjonalna)"
+    elif rsi > 65:
+        rsi_desc = "Wykupienie (Podwyższone ryzyko korekty)"
+    else:
+        rsi_desc = "Neutralne momentum"
+
+    if pct_b < 0.2:
+        bb_desc = "Blisko dolnej wstęgi Bollingera (Potencjał odbicia)"
+    elif pct_b > 0.8:
+        bb_desc = "Blisko górnej wstęgi Bollingera (Lokalny opór)"
+    else:
+        bb_desc = "Wewnątrz standardowego kanału zmienności"
+
+    tp_5 = price_raw * 1.05
+    tp_75 = price_raw * 1.075
+    tp_10 = price_raw * 1.10
 
     return f"""
-### 📑 RAPORT AI: {symbol} (${price_str}, Zmiana 24h: {change_24h}%)
-* **Trend strukturalny:** {trend_desc}
-* **Momentum (RSI):** {rsi} | **Wstęgi Bollingera (%B):** {pct_b:.2f}
-* **Symulacja Monte Carlo (24h):** {prognoza_mc} | **Szansa na sukces:** **{prob_val}%**
-* **Poziomy krytyczne:** Wsparcie: `${support_str}` | Opór: `${resistance_str}` | Stop Loss: `${sl_str}`
-* **R:R:** `{rr}` | **Sygnał:** {signal}
+### 📑 ROZBUDOWANY RAPORT ANALITYCZNY AI: {symbol}
+**Aktualna cena:** `${price_str}` | **Zmiana 24h:** `{change_24h}%` | **Rekomendacja:** **{signal}**
+
+---
+
+#### 1. 📌 Podsumowanie i Rekomendacja Operacyjna
+* **Status Sygnału:** **{signal}**
+* **Główna Diagnoza:** Token znajduje się w trendzie **{trend_status}**. Momentum wskaźnika RSI wynosi **{rsi}** ({rsi_desc}).
+* **Warunki Otwarcia:** Nowa pozycja w archiwum otwiera się wyłącznie przy sygnale *Mocny KUP*, schłodzonym RSI ($\le 48$) oraz po odczekaniu 24h od poprzedniej transakcji.
+
+#### 2. 📊 Analiza Wskaźników Technicznych
+* **Wskaźnik RSI (14):** `{rsi}` — {rsi_desc}.
+* **Wstęgi Bollingera (%B):** `{pct_b:.2f}` — {bb_desc}.
+* **Średnia EMA 200:** `${fmt(ema_raw)}` (Dystans ceny od EMA200: `{round(((price_raw - ema_raw)/ema_raw)*100, 2) if ema_raw > 0 else 0}%`).
+* **Wolumen:** Skok aktywności `{vol_surge}` w stosunku do średniej.
+
+#### 3. 🎲 Symulacja Monte Carlo & Implikowana Zmienność (Deribit)
+* **Średnia prognoza Monte Carlo (24h):** `{prognoza_mc}`
+* **Przewidywany zasięg MC (95% pewności):** `{mc_range}`
+* **Zasięg zmienności opcyjnej DVOL (95%):** `{dvol_range}`
+* **Implikowana Zmienność (IV):** `{iv_str}`
+* **Statystyczna szansa wzrostu:** **{prob_str}**
+
+#### 4. 🎯 Poziomy Docelowe Take Profit & Risk Management
+* **Kluczowe Wsparcie:** `${support_str}`
+* **Kluczowy Opór:** `${resistance_str}`
+* **Sugerowany Stop Loss (ATR):** `${sl_str}`
+* **Stosunek Zysku do Ryzyka (R:R):** `{rr}`
+* **Progi wyjścia TP:**
+  * **TP 1 (+5.0%):** `${fmt(tp_5)}` *(Pierwszy automatyczny cel wyjścia)*
+  * **TP 2 (+7.5%):** `${fmt(tp_75)}` *(Średnioterminowy target)*
+  * **TP 3 (+10.0%):** `${fmt(tp_10)}` *(Maksymalny cel krótkoterminowy)*
 """
 
 # ==========================================
