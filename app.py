@@ -6,7 +6,7 @@ import streamlit as st
 # ==========================================
 # KONFIGURACJA STRONY I LOGOWANIE
 # ==========================================
-st.set_page_config(page_title="Crypto Dashboard Pro", layout="wide")
+st.set_page_config(page_title="Crypto Spot Pro", layout="wide")
 
 HASLO = st.secrets.get("PASSWORD", "Krypto2026!")
 
@@ -35,7 +35,7 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# LOGIKA DANYCH (TA + HYBRYDA RSI/ML)
+# LISTA TOKENÓW SPOT
 # ==========================================
 TOKENS = [
     {'symbol': 'BTC', 'coinbase': 'BTC-USD', 'gecko_id': 'bitcoin'},
@@ -55,7 +55,7 @@ TOKENS = [
 
 def fmt(val):
     if pd.isna(val) or val is None:
-        return ""
+        return "-"
     if isinstance(val, (int, float)):
         if abs(val) < 1.0:
             return round(val, 6)
@@ -73,6 +73,14 @@ def get_fear_and_greed():
         return val, classification
     except Exception:
         return 50, "Neutral"
+
+def get_global_market_data():
+    try:
+        res = requests.get("https://api.coingecko.com/api/v3/global", headers={"User-Agent": "CryptoDashboard/1.0"}, timeout=4).json()
+        btc_dom = res['data']['market_cap_percentage']['btc']
+        return round(btc_dom, 1)
+    except Exception:
+        return 55.0
 
 def fetch_from_coinbase(symbol_pair, granularity=3600):
     url = f"https://api.exchange.coinbase.com/products/{symbol_pair}/candles?granularity={granularity}"
@@ -128,6 +136,7 @@ def fetch_technical_analysis():
     loaded_count = 0
     total_count = len(TOKENS)
     fng_val, fng_class = get_fear_and_greed()
+    btc_dom = get_global_market_data()
     btc_d1_price, btc_d1_ema200 = get_btc_daily_macro_ema200()
 
     for item in TOKENS:
@@ -215,7 +224,7 @@ def fetch_technical_analysis():
         except Exception:
             continue
             
-    return pd.DataFrame(data), fng_val, fng_class, btc_d1_price, btc_d1_ema200, loaded_count, total_count
+    return pd.DataFrame(data), fng_val, fng_class, btc_dom, btc_d1_price, btc_d1_ema200, loaded_count, total_count
 
 def run_predictions(df_ta, fng_val):
     if df_ta.empty or "RawScore" not in df_ta.columns:
@@ -235,6 +244,10 @@ def run_predictions(df_ta, fng_val):
     if not btc_row.empty:
         btc_vol_ratio = (float(btc_row["ATR"].values[0]) / float(btc_row["Price_Raw"].values[0]))
 
+    # Stałe ziarno zależne od godziny (stabilność wyników Monte Carlo)
+    seed_val = int(pd.Timestamp.now().strftime("%Y%m%d%H"))
+    rng = np.random.default_rng(seed=seed_val)
+
     def analyze_row(row):
         symbol = row["Token"]
         price = float(row["Price_Raw"])
@@ -253,7 +266,7 @@ def run_predictions(df_ta, fng_val):
         expected_change = (change / 100 * 0.05) + rsi_bounce + bb_bounce
         target_price = price * (1 + expected_change)
 
-        shocks = np.random.normal(expected_change / 24.0, (atr / price) / np.sqrt(24), (10000, 24))
+        shocks = rng.normal(expected_change / 24.0, (atr / price) / np.sqrt(24), (10000, 24))
         final_prices = price * np.exp(np.cumsum(shocks, axis=1))[:, -1]
 
         prob = np.mean(final_prices > price) * 100
@@ -293,97 +306,88 @@ def run_predictions(df_ta, fng_val):
     return df_ml[["Token", "Cena ($)", "Prognoza ML (24h)", "Zasięg Monte Carlo (95%)", "Zasięg Opcji DVOL (95%)", "Implikowana Zmienność (IV)", "Prawdopodobieństwo", "Sygnał Hybrydowy"]]
 
 # ==========================================
-# GŁÓWNY INTERFEJS UŻYTKOWNIKA
+# INTERFEJS UŻYTKOWNIKA (UI)
 # ==========================================
-df_ta, fng_val, fng_class, btc_d1_price, btc_d1_ema200, loaded_count, total_count = fetch_technical_analysis()
+df_ta, fng_val, fng_class, btc_dom, btc_d1_price, btc_d1_ema200, loaded_count, total_count = fetch_technical_analysis()
 
-col_title, col_btc_macro, col_fng = st.columns([2.5, 1.2, 1])
+col_title, col_btc_macro, col_dom, col_fng = st.columns([2.0, 1.1, 0.9, 1.0])
 with col_title:
-    st.title("📊 Zintegrowany Panel Analityczny Crypto Pro")
-    st.caption(f"ℹ️ Status API: Pomyślnie załadowano dane dla **{loaded_count}/{total_count}** tokenów (Źródło: Coinbase/Coingecko).")
+    st.title("🎯 Crypto Spot Pro")
+    st.caption(f"Aktualizacja: {pd.Timestamp.now().strftime('%H:%M:%S')} | Tokeny: {loaded_count}/{total_count}")
 
 with col_btc_macro:
     if btc_d1_price and btc_d1_ema200:
         is_bullish = btc_d1_price >= (btc_d1_ema200 * 0.985)
-        status_label = "🟢 Wzrostowy (Byczy)" if is_bullish else "🔴 Spadkowy (Niedźwiedzi)"
-        st.metric(label="BTC Trend D1 (EMA 200)", value=status_label, delta=f"Cena: ${fmt(btc_d1_price)}")
+        status_label = "🟢 Byczy" if is_bullish else "🔴 Niedźwiedzi"
+        st.metric(label="BTC Trend D1", value=status_label, delta=f"${fmt(btc_d1_price)}")
     else:
         st.metric(label="BTC Trend D1", value="Brak danych")
 
+with col_dom:
+    st.metric(label="Dominacja BTC", value=f"{btc_dom}%", delta="Kapitał Spot")
+
 with col_fng:
-    st.metric(label="Fear & Greed Index", value=f"{fng_val}/100", delta=fng_class)
+    st.metric(label="Fear & Greed", value=f"{fng_val}/100", delta=fng_class)
 
-# Dynamiczne wskazówki behawioralne oparte o FNG
-if fng_val < 25:
-    st.info("💡 **Wskazówka behawioralna (Ekstremalny strach):** Historycznie to najlepsze momenty na akumulację i zakupy DCA.")
-elif fng_val > 75:
-    st.warning("⚠️ **Wskazówka behawioralna (Ekstremalna chciwość):** Rynek rozgrzany – zachowaj szczególną ostrożność i rozważ realizację zysków.")
+# Szybki filtr / podgląd mobilny (wybór tokena na samej górze)
+if not df_ta.empty:
+    st.markdown("---")
+    selected_token = st.selectbox("📱 Szybki podgląd wybranego tokena (dla wygody na telefonie):", df_ta["Token"].tolist())
+    token_row = df_ta[df_ta["Token"] == selected_token].iloc[0]
+    
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Cena Spot", token_row["Cena ($)"])
+    m2.metric("Zmiana 24h", f"{token_row['24h (%)']}%")
+    m3.metric("RSI (14)", token_row["RSI"])
+    m4.metric("Atrakcyjność", token_row["Atrakcyjność (%)"])
+    m5.metric("Sugerowany SL", token_row["SL (ATR)"])
 
-if not df_ta.empty and "RawScore" in df_ta.columns:
-    top_deals = df_ta[df_ta["RawScore"] >= 70.0]
-    if not top_deals.empty:
-        st.success(f"🔥 **WYKRYTO MOCNE OKAZJE:** Tokeny {', '.join(top_deals['Token'].tolist())} osiągnęły wysoki poziom atrakcyjności!")
-    else:
-        st.info("ℹ️ Brak w tej chwili wygenerowanych sygnałów o wysokim priorytecie (≥70%).")
-
-if st.button("🔄 Odśwież dane", type="primary"):
+st.markdown("---")
+if st.button("🔄 Odśwież dane rynkowe", type="primary"):
     st.cache_data.clear()
+    st.rerun()
 
 df_ml = run_predictions(df_ta, fng_val)
 df_ta_clean = df_ta.drop(columns=["RawScore", "Vol_Surge_Raw", "Price_Raw", "EMA200_Raw", "BTC_D1_Price", "BTC_D1_EMA200"], errors="ignore")
 
-tab1, tab2 = st.tabs(["1. Pełna Analiza Techniczna", "2. Prognoza Hybrydowa ML & Monte Carlo"])
+tab1, tab2 = st.tabs(["1. Tabela Techniczna Spot", "2. Sygnały Hybrydowe & Monte Carlo"])
 
 with tab1:
-    st.dataframe(df_ta_clean, use_container_width=True)
+    st.dataframe(df_ta_clean.style.map(lambda v: 'color: #2e7d32; font-weight: bold;' if isinstance(v, (int, float)) and v > 0 else ('color: #c62828; font-weight: bold;' if isinstance(v, (int, float)) and v < 0 else ''), subset=['24h (%)']), use_container_width=True)
 
 with tab2:
     st.dataframe(df_ml, use_container_width=True)
 
 # ==========================================
-# AUTOMATYCZNE PODSUMOWANIE I INTERPRETACJA
+# PODSUMOWANIE DLA HANDLU SPOT
 # ==========================================
 st.divider()
-st.subheader("💡 Podsumowanie i Interpretacja Wyników")
+st.subheader("💡 Strategiczne Podsumowanie Spot")
 
 if not df_ml.empty and "Sygnał Hybrydowy" in df_ml.columns:
     strong_buys = df_ml[df_ml["Sygnał Hybrydowy"] == "🟢 KUP (Mocny)"]["Token"].tolist()
     weak_buys = df_ml[df_ml["Sygnał Hybrydowy"] == "📈 KUP (Słaby)"]["Token"].tolist()
     sells = df_ml[df_ml["Sygnał Hybrydowy"] == "🔴 SPRZEDAJ"]["Token"].tolist()
 
-    col_sum1, col_sum2, col_sum3 = st.columns(3)
+    c1, c2, c3 = st.columns(3)
 
-    with col_sum1:
-        st.markdown("### 🟢 Najsilniejsze Okazje")
+    with c1:
+        st.markdown("### 🟢 Mocna Akumulacja Spot")
         if strong_buys:
-            st.success(f"**Tokeny:** {', '.join(strong_buys)}\n\n"
-                       "**Interpretacja:** Aktywa te posiadają potrójne potwierdzenie: wysokie prawdopodobieństwo wzrostu, podwyższony wolumen oraz sprzyjające otoczenie makro Bitcoina.")
+            st.success(f"**Tokeny:** {', '.join(strong_buys)}\n\nPotrójne potwierdzenie: wysoka szansa wzrostu, poprawny wolumen i sprzyjający trend BTC.")
         else:
-            st.info("Brak tokenów kwalifikujących się do pełnego sygnału akumulacji.")
+            st.info("Brak tokenów w silnej strefie zakupowej.")
 
-    with col_sum2:
-        st.markdown("### 📈 Akumulacja Ostrożna")
+    with c2:
+        st.markdown("### 📈 Ostrożne Wejście (DCA)")
         if weak_buys:
-            st.warning(f"**Tokeny:** {', '.join(weak_buys)}\n\n"
-                       "**Interpretacja:** Sygnał wzrostowy z zastrzeżeniem. Może to wynikać ze słabszego wolumenu lub ograniczenia narzuconego przez trend makro BTC.")
+            st.warning(f"**Tokeny:** {', '.join(weak_buys)}\n\nRozważ zakup hybrydowy lub mniejsze transakcje metodą DCA ze względu na mieszane warunki wolumenowe.")
         else:
-            st.info("Brak tokenów w strefie umiarkowanego zakupu.")
+            st.info("Brak tokenów w strefie ostrożnej akumulacji.")
 
-    with col_sum3:
-        st.markdown("### 🔴 Ryzyko / Wyprzedaż")
+    with c3:
+        st.markdown("### 🔴 Realizacja Zysków")
         if sells:
-            st.error(f"**Tokeny:** {', '.join(sells)}\n\n"
-                     "**Interpretacja:** Wysokie ryzyko spadku cen lub przegrzane wskaźniki. Zalecana realizacja zysków lub ucieczka do kapitału.")
+            st.error(f"**Tokeny:** {', '.join(sells)}\n\nPrzegrzane wskaźniki – dobra chwila na rozważenie sprzedaży częściowej lub całościowej pozycji spot.")
         else:
-            st.success("Brak tokenów z aktywnym sygnałem wyprzedaży.")
-
-    st.markdown("---")
-    st.markdown("### 🔍 Kluczowe Wnioski Rynkowe")
-    
-    btc_macro_text = "Byczy (sprzyja altcoinom)" if btc_d1_price and btc_d1_ema200 and btc_d1_price >= (btc_d1_ema200 * 0.985) else "Niedźwiedzi (ostrożność na altcoinach)"
-    
-    st.markdown(f"""
-    * **Sentyment ogólny:** Fear & Greed Index wynosi **{fng_val}/100 ({fng_class})**. 
-    * **Filtr Trendu BTC:** Trend dzienny Bitcoina oceniono jako **{btc_macro_text}**.
-    * **Rekomendacja:** W przypadku sygnałów *KUP (Słaby)* warto rozważyć wchodzenie w pozycje metodą DCA (podział kapitału na części), natomiast dla sygnałów *KUP (Mocny)* można rozważyć wejście przy obecnych wsparciach z ustawionym zleceniem Stop-Loss.
-    """)
+            st.success("Brak sygnałów pilnej wyprzedaży.")
