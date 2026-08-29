@@ -502,7 +502,6 @@ def run_predictions(df_ta, btc_dom):
       "Ocena Przewagi (Edge)",
   ]] = df_ml.apply(analyze_row, axis=1)
 
-  # Przywrócenie kolumny Atrakcyjność (%) w tabeli głównej oraz macierzy
   df_ml["Atrakcyjność (%)"] = df_ml["Prawdopodobieństwo"]
 
   return df_ml[[
@@ -640,7 +639,7 @@ def get_backtest_stats(target_pct_str):
 
 
 # ==========================================
-# EKSPERCKI RAPORT AI (SZCZEGÓŁOWY OPIS WSKAŹNIKÓW I WNIOSKI)
+# EKSPERCKI RAPORT AI (JEDNA KOMPLETNA FUNKCJA)
 # ==========================================
 def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
   symbol = row_ta.get("Token", "UNKNOWN")
@@ -667,7 +666,6 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
       row_ml.get("Prawdopodobieństwo", "50.0%") if row_ml is not None else "50%"
   )
 
-  # Dokładna diagnoza strukturalna
   if "Silny Trend" in regime:
     conclusion = f"Struktura jest czysta. Kupujący kontrolują sytuację na 4H, a cena (${fmt(price_raw)}) utrzymuje się ponad EMA200 (${fmt(ema_raw)}). Środowisko sprzyja kontynuacji wzrostów."
   elif "Korekta" in regime:
@@ -769,7 +767,6 @@ df_ta_clean = df_ta.drop(
     errors="ignore",
 )
 
-# Dodanie kolumny Atrakcyjność (%) również do tabeli głównej reżimów
 if "Atrakcyjność (%)" not in df_ta_clean.columns and not df_ml.empty:
   df_ta_clean["Atrakcyjność (%)"] = df_ml["Atrakcyjność (%)"]
 
