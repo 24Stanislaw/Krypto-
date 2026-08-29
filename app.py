@@ -6,7 +6,7 @@ import streamlit as st
 # ==========================================
 # KONFIGURACJA STRONY I LOGOWANIE
 # ==========================================
-st.set_page_config(page_title="Crypto Spot Pro", layout="wide")
+st.set_page_config(page_title="Analiza", layout="wide")
 
 HASLO = st.secrets.get("PASSWORD", "Krypto2026!")
 
