@@ -305,7 +305,6 @@ def update_and_log_history(df_ml, df_ta, hist_dfs):
             typ_sig = str(row.get("Typ Sygnału", ""))
             kierunek = "SHORT" if "SPRZEDAJ" in typ_sig else "LONG"
             
-            # BEZPIECZNA KONWERSJA CENA WEJŚCIA
             try:
                 entry = float(row.get("Cena Wejścia"))
             except (ValueError, TypeError):
@@ -314,7 +313,6 @@ def update_and_log_history(df_ml, df_ta, hist_dfs):
             
             curr_price = float(price_map.get(token, entry))
             
-            # BEZPIECZNA KONWERSJA EKSTREMUM
             try:
                 prev_extr = float(row.get("Ekstremum Ceny"))
             except (ValueError, TypeError):
@@ -344,7 +342,6 @@ def update_and_log_history(df_ml, df_ta, hist_dfs):
 
             df_hist.at[idx, "Ekstremum Ceny"] = float(new_extr)
 
-            # BEZPIECZNA KONWERSJA ATR WEJŚCIA
             try:
                 entry_atr = float(row.get("ATR Wejścia"))
                 if pd.isna(entry_atr) or entry_atr <= 0:
