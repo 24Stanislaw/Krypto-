@@ -94,11 +94,9 @@ def get_global_market_data():
     except Exception: return 55.0
 
 # ==========================================
-# POBIERANIE DANYCH (Zoptymalizowane i bezpieczne dla API)
+# POBIERANIE DANYCH
 # ==========================================
 def fetch_from_coinbase(symbol_pair):
-    # Optymalizacja: 2 iteracje po 450 godzin (łącznie ok. 37 dni)
-    # Zapewnia ~225 świec 4H (wystarczająco do EMA 200) i chroni przed błędem 429 (Too Many Requests).
     df_list = []
     end_time = datetime.datetime.utcnow()
     for _ in range(2):
@@ -111,7 +109,7 @@ def fetch_from_coinbase(symbol_pair):
             end_time = start_time
         else:
             break
-        time.sleep(0.3) # Bezpieczny odstęp czasowy chroniący przed blokadą IP
+        time.sleep(0.3)
         
     if df_list:
         df = pd.concat(df_list).drop_duplicates('timestamp')
@@ -125,7 +123,7 @@ def fetch_from_coingecko(gecko_id):
     res.raise_for_status()
     df = pd.DataFrame(res.json(), columns=['timestamp', 'open', 'high', 'low', 'close'])
     df['dt'] = pd.to_datetime(df['timestamp'], unit='ms')
-    df['volume'] = 0.0 # CoinGecko OHLC nie daje wolumenu
+    df['volume'] = 0.0
     return df.sort_values('dt').reset_index(drop=True)
 
 def get_simple_coingecko_price(gecko_id):
@@ -162,7 +160,7 @@ def calc_rsi(series, period=14):
 @st.cache_data(ttl=300)
 def fetch_technical_analysis():
     data = []
-    hist_dfs = {} # Słownik przechowujący pełne DataFrame 1H dla logiki Offline-Extremes
+    hist_dfs = {}
     loaded_count = 0
     fng_val, fng_class = get_fear_and_greed()
     btc_dom = get_global_market_data()
@@ -184,19 +182,15 @@ def fetch_technical_analysis():
             price = float(df_1h['close'].iloc[-1])
             change_24h = ((price - df_1h['close'].iloc[-24]) / df_1h['close'].iloc[-24]) * 100 if len(df_1h) >= 24 else 0.0
 
-            # 1. Poprawka Repaintingu: Oddzielne wskaźniki dla bieżącego UI i zamkniętych świec
             rsi_1h = calc_rsi(df_1h['close'])
             rsi_4h = calc_rsi(df_4h['close'])
             rsi_12h = calc_rsi(df_12h['close'])
             
-            # Wskaźniki wyliczane na ZAMKNIĘTYCH świecach do twardej logiki sygnału
             rsi_4h_closed = calc_rsi(df_4h['close'].iloc[:-1])
             rsi_12h_closed = calc_rsi(df_12h['close'].iloc[:-1])
 
-            # 2. Prawdziwa EMA 200 (mamy teraz ponad 200 świec 4H)
             ema200_4h = float(df_4h['close'].ewm(span=200, adjust=False).mean().iloc[-1])
             
-            # Obliczenie zmienności ATR
             tr = pd.concat([df_4h['high'] - df_4h['low'], (df_4h['high'] - df_4h['close'].shift()).abs(), (df_4h['low'] - df_4h['close'].shift()).abs()], axis=1).max(axis=1)
             atr = float(tr.rolling(14).mean().iloc[-1])
             sl = price - (2 * atr)
@@ -206,10 +200,9 @@ def fetch_technical_analysis():
             if price > ema200_4h: support = max(support, float(ema200_4h))
             elif price < ema200_4h: resistance = min(resistance, float(ema200_4h))
             
-            # 3. Weryfikacja wolumenu
             vol_sma = df_4h['volume'].rolling(20).mean().iloc[-2] if 'volume' in df_4h.columns and df_4h['volume'].sum() > 0 else 0
             curr_vol = df_4h['volume'].iloc[-1]
-            vol_spike = (curr_vol > (vol_sma * 1.5)) if vol_sma > 0 else True # Jeśli brak wolumenu (Coingecko), przepuszczamy
+            vol_spike = (curr_vol > (vol_sma * 1.5)) if vol_sma > 0 else True
             
             mtf_score = 0
             if rsi_1h <= 45: mtf_score += 1
@@ -261,7 +254,6 @@ def run_predictions(df_ta):
 
         is_uptrend = price > float(row["EMA200_Raw"])
 
-        # Sygnał oparty na zamkniętych świecach wyższych rzędów (brak repaintingu)
         if mtf_score >= 3 and rsi_1h <= 45:
             if is_uptrend and vol_spike:
                 signal = "🟢 KUP (Trend + Wolumen)"
@@ -312,13 +304,22 @@ def update_and_log_history(df_ml, df_ta, hist_dfs):
             token = row["Token"]
             typ_sig = str(row.get("Typ Sygnału", ""))
             kierunek = "SHORT" if "SPRZEDAJ" in typ_sig else "LONG"
-            entry = float(row["Cena Wejścia"]) if pd.notna(row["Cena Wejścia"]) else 0.0
+            
+            # BEZPIECZNA KONWERSJA CENA WEJŚCIA
+            try:
+                entry = float(row.get("Cena Wejścia"))
+            except (ValueError, TypeError):
+                entry = 0.0
             if entry <= 0: continue
             
             curr_price = float(price_map.get(token, entry))
-            prev_extr = float(row["Ekstremum Ceny"]) if pd.notna(row["Ekstremum Ceny"]) else entry
             
-            # Skanowanie historyczne (rozwiązanie problemu snapshotu)
+            # BEZPIECZNA KONWERSJA EKSTREMUM
+            try:
+                prev_extr = float(row.get("Ekstremum Ceny"))
+            except (ValueError, TypeError):
+                prev_extr = entry
+            
             historical_max_min = prev_extr
             if token in hist_dfs and "W toku" in str(row["Status"]):
                 try:
@@ -343,7 +344,14 @@ def update_and_log_history(df_ml, df_ta, hist_dfs):
 
             df_hist.at[idx, "Ekstremum Ceny"] = float(new_extr)
 
-            entry_atr = float(row.get("ATR Wejścia", entry * 0.02))
+            # BEZPIECZNA KONWERSJA ATR WEJŚCIA
+            try:
+                entry_atr = float(row.get("ATR Wejścia"))
+                if pd.isna(entry_atr) or entry_atr <= 0:
+                    entry_atr = entry * 0.02
+            except (ValueError, TypeError):
+                entry_atr = entry * 0.02
+
             tp1_pct = ((1.5 * entry_atr) / entry) * 100
             tp2_pct = ((3.0 * entry_atr) / entry) * 100
             tp3_pct = ((5.0 * entry_atr) / entry) * 100
@@ -412,9 +420,14 @@ def get_backtest_stats(target_str):
 
     for _, row in df_hist.iterrows():
         try:
-            entry = float(row.get("Cena Wejścia", 0))
-            extr_p = float(row.get("Ekstremum Ceny", entry))
-        except Exception: continue
+            entry = float(row.get("Cena Wejścia"))
+        except (ValueError, TypeError):
+            entry = 0.0
+        try:
+            extr_p = float(row.get("Ekstremum Ceny"))
+        except (ValueError, TypeError):
+            extr_p = entry
+        if entry <= 0: continue
             
         tp_hit = str(row.get(col_tp, "-"))
         status = str(row.get("Status", "-"))
