@@ -244,7 +244,7 @@ def run_predictions(df_ta, fng_val):
     if not btc_row.empty:
         btc_vol_ratio = (float(btc_row["ATR"].values[0]) / float(btc_row["Price_Raw"].values[0]))
 
-    # Stałe ziarno zależne od godziny (stabilność wyników Monte Carlo)
+    # Stałe ziarno zależne od godziny
     seed_val = int(pd.Timestamp.now().strftime("%Y%m%d%H"))
     rng = np.random.default_rng(seed=seed_val)
 
@@ -305,6 +305,43 @@ def run_predictions(df_ta, fng_val):
     
     return df_ml[["Token", "Cena ($)", "Prognoza ML (24h)", "Zasięg Monte Carlo (95%)", "Zasięg Opcji DVOL (95%)", "Implikowana Zmienność (IV)", "Prawdopodobieństwo", "Sygnał Hybrydowy"]]
 
+def generuj_raport_ai(row_ta, row_ml=None):
+    symbol = row_ta.get("Token", "Token")
+    price = row_ta.get("Cena ($)", "-")
+    rsi = row_ta.get("RSI", 50.0)
+    sl = row_ta.get("SL (ATR)", "-")
+    resistance = row_ta.get("Opór", "-")
+    rr = row_ta.get("R:R", "-")
+    szansa = row_ta.get("Szansa (%)", "-")
+    vol = row_ta.get("Wolumen (x)", "1.0x")
+    okazja = row_ta.get("Atrakcyjność (%)", "-")
+
+    if isinstance(rsi, (float, int)):
+        if rsi < 30:
+            rsi_desc = "jest mocno wyprzedany (strefa potencjalnej okazji)"
+        elif rsi > 70:
+            rsi_desc = "jest mocno wykupiony (podwyższone ryzyko korekty)"
+        else:
+            rsi_desc = "znajduje się w zbalansowanej, neutralnej strefie"
+    else:
+        rsi_desc = "brak danych"
+
+    ml_txt = ""
+    if row_ml is not None:
+        prog = row_ml.get("Prognoza ML (24h)", "-")
+        mc = row_ml.get("Zasięg Monte Carlo (95%)", "-")
+        iv = row_ml.get("Implikowana Zmienność (IV)", "-")
+        signal = row_ml.get("Sygnał Hybrydowy", "-")
+        ml_txt = f"\n* **Modele & Monte Carlo:** Sygnał hybrydowy to **{signal}**. Prognoza ML (24h) wynosi **{prog}**, a statystyczny 95% zasięg Monte Carlo to **{mc}** (zmienność IV: {iv})."
+
+    return f"""
+📄 **Raport Analityczny AI: {symbol}**
+
+* **Stan Techniczny:** Aktualna cena wynosi **${price}**. Wskaźnik RSI ({rsi}) wskazuje, że token {rsi_desc}. Wskaźnik wolumenu wynosi **{vol}**.
+* **Zarządzanie Ryzykiem:** Sugerowany poziom obrony (Stop Loss) znajduje się na cenie **${sl}**. Zapewnia to matematyczny bufor wyliczony na podstawie zmienności ATR.
+* **Potencjał i Cele:** Najbliższy kluczowy opór wyznaczoną na poziomie **${resistance}**. Stosunek zysku do ryzyka wynosi **{rr}**, a wyliczona szansa na powodzenie to **{szansa}** (Ogólna atrakcyjność: **{okazja}**).{ml_txt}
+"""
+
 # ==========================================
 # INTERFEJS UŻYTKOWNIKA (UI)
 # ==========================================
@@ -329,7 +366,7 @@ with col_dom:
 with col_fng:
     st.metric(label="Fear & Greed", value=f"{fng_val}/100", delta=fng_class)
 
-# Szybki filtr / podgląd mobilny (wybór tokena na samej górze)
+# Szybki filtr / podgląd mobilny
 if not df_ta.empty:
     st.markdown("---")
     selected_token = st.selectbox("📱 Szybki podgląd wybranego tokena (dla wygody na telefonie):", df_ta["Token"].tolist())
@@ -357,6 +394,19 @@ with tab1:
 
 with tab2:
     st.dataframe(df_ml, use_container_width=True)
+
+# ==========================================
+# RAPORT ANATILTYCZNY AI
+# ==========================================
+if not df_ta.empty:
+    st.divider()
+    st.subheader("🤖 Raport Analityczny AI")
+    selected_ai_token = st.selectbox("Wybierz token, aby wygenerować pełny raport opisowy:", df_ta["Token"].tolist(), key="ai_select_box")
+    
+    row_ta_sel = df_ta[df_ta["Token"] == selected_ai_token].iloc[0]
+    row_ml_sel = df_ml[df_ml["Token"] == selected_ai_token].iloc[0] if not df_ml.empty and "Token" in df_ml.columns else None
+    
+    st.info(generuj_raport_ai(row_ta_sel, row_ml_sel))
 
 # ==========================================
 # PODSUMOWANIE DLA HANDLU SPOT
