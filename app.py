@@ -36,7 +36,7 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# LISTA TOKENÓW SPOT (DOKŁADNIE TWOJA KOLEJNOŚĆ)
+# LISTA TOKENÓW SPOT
 # ==========================================
 TOKENS = [
     {'symbol': 'ONDO', 'coinbase': 'ONDO-USD', 'gecko_id': 'ondo-finance'},
@@ -71,7 +71,7 @@ def fmt(val):
 
 def get_fear_and_greed():
     try:
-        res = requests.get("https://api.alternative.me/fng/", timeout=4).json()
+        res = requests.get("https://api.alternative.me/fng/?limit=1", timeout=4).json()
         return int(res['data'][0]['value']), res['data'][0]['value_classification']
     except Exception:
         return 50, "Neutral"
@@ -82,6 +82,53 @@ def get_global_market_data():
         return round(res['data']['market_cap_percentage']['btc'], 1)
     except Exception:
         return 55.0
+
+def calculate_altcoin_season_index():
+    try:
+        url = "https://api.coingecko.com/api/v3/coins/markets"
+        params = {
+            "vs_currency": "usd",
+            "order": "market_cap_desc",
+            "per_page": 100,
+            "page": 1,
+            "sparkline": "false",
+            "price_change_percentage": "200d"
+        }
+        res = requests.get(url, params=params, headers={"User-Agent": "CryptoDashboard/1.0"}, timeout=6)
+        if res.status_code != 200:
+            return 45
+            
+        coins = res.json()
+        exclude_symbols = ['usdt', 'usdc', 'fdusd', 'dai', 'usde', 'wbtc', 'steth', 'weth']
+        btc_change = 0.0
+        
+        for coin in coins:
+            if coin['symbol'].lower() == 'btc':
+                btc_change = coin.get('price_change_percentage_200d_in_currency', 0.0)
+                break
+                
+        better_than_btc = 0
+        valid_count = 0
+        
+        for coin in coins:
+            symbol = coin['symbol'].lower()
+            if symbol == 'btc' or symbol in exclude_symbols:
+                continue
+                
+            change = coin.get('price_change_percentage_200d_in_currency')
+            if change is not None:
+                valid_count += 1
+                if change > btc_change:
+                    better_than_btc += 1
+                    
+            if valid_count >= 50:
+                break
+                
+        if valid_count > 0:
+            return int((better_than_btc / valid_count) * 100)
+        return 45
+    except Exception:
+        return 45
 
 def fetch_from_coinbase(symbol_pair):
     url = f"https://api.exchange.coinbase.com/products/{symbol_pair}/candles?granularity=3600"
@@ -112,7 +159,6 @@ def get_simple_coingecko_price(gecko_id):
     except Exception:
         pass
     
-    # Realistyczny fallback dla trudniejszych tokenów (np. KTA ~0.08 USD)
     if gecko_id == 'keeta':
         return 0.08, 0.0
     return 1.0, 0.0
@@ -153,6 +199,7 @@ def fetch_technical_analysis():
     loaded_count = 0
     fng_val, fng_class = get_fear_and_greed()
     btc_dom = get_global_market_data()
+    alt_season = calculate_altcoin_season_index()
 
     for item in TOKENS:
         symbol = item['symbol']
@@ -217,7 +264,7 @@ def fetch_technical_analysis():
             })
             loaded_count += 1
             
-    return pd.DataFrame(data), fng_val, fng_class, btc_dom, loaded_count, len(TOKENS)
+    return pd.DataFrame(data), fng_val, fng_class, btc_dom, alt_season, loaded_count, len(TOKENS)
 
 def run_predictions(df_ta, fng_val):
     if df_ta.empty:
@@ -485,14 +532,15 @@ def generuj_raport_ai(row_ta, row_ml=None):
 # INTERFEJS GŁÓWNY (UI)
 # ==========================================
 with st.spinner("🔄 Pobieram dane i obliczam Multi-Timeframe (1H, 2H, 4H, 12H)..."):
-    df_ta, fng_val, fng_class, btc_dom, loaded_c, total_c = fetch_technical_analysis()
+    df_ta, fng_val, fng_class, btc_dom, alt_season, loaded_c, total_c = fetch_technical_analysis()
     df_ml = run_predictions(df_ta, fng_val)
     update_and_log_history(df_ml, df_ta)
 
-col_t, col_d, col_f = st.columns([2.5, 1, 1])
+col_t, col_d1, col_d2, col_f = st.columns([2.0, 1, 1, 1])
 col_t.title("📊 Analiza Krypto (Multi-Timeframe)")
 col_t.caption(f"Aktualizacja: {pd.Timestamp.now().strftime('%H:%M:%S')} | Załadowano: {loaded_c}/{total_c}")
-col_d.metric("Dominacja BTC", f"{btc_dom}%")
+col_d1.metric("Dominacja BTC", f"{btc_dom}%")
+col_d2.metric("Sezon Altcoinów", f"{alt_season}/100", "Sezon BTC" if alt_season < 50 else "Sezon Alt")
 col_f.metric("Fear & Greed", f"{fng_val}/100", fng_class)
 
 st.markdown("---")
