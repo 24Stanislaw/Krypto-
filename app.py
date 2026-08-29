@@ -202,7 +202,7 @@ def run_predictions(df_ta, fng_val):
         return pd.DataFrame()
 
     dvol_btc = get_deribit_dvol("BTC")
-    rng = np.random.defaultrng(seed=int(pd.Timestamp.now().strftime("%Y%m%d%H")))
+    rng = np.random.default_rng(seed=int(pd.Timestamp.now().strftime("%Y%m%d%H")))
 
     def analyze_row(row):
         symbol, price, atr = row["Token"], float(row["Price_Raw"]), float(row["ATR"])
