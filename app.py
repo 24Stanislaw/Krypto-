@@ -123,16 +123,6 @@ def calc_rsi(series, period=14):
     loss = (-delta.clip(upper=0)).rolling(period).mean()
     return 100 - (100 / (1 + (gain.iloc[-1] / (loss.iloc[-1] + 1e-9))))
 
-def get_deribit_dvol(currency="BTC"):
-    try:
-        url = f"https://www.deribit.com/api/v2/public/get_volatility_index_data?currency={currency}&resolution=1D"
-        res = requests.get(url, headers={"User-Agent": "CryptoDashboard/1.0"}, timeout=4).json()
-        if 'result' in res and 'data' in res['result'] and len(res['result']['data']) > 0:
-            return float(res['result']['data'][-1][4])
-    except Exception:
-        pass
-    return 60.0
-
 @st.cache_data(ttl=300)
 def fetch_technical_analysis():
     data = []
@@ -231,7 +221,7 @@ def run_predictions(df_ta, fng_val):
     return df_ml[["Token", "Cena ($)", "RSI 1H", "RSI 4H", "RSI 12H", "MTF Zgoda", "Prognoza MC (24h)", "Zasięg Monte Carlo (95%)", "Prawdopodobieństwo", "Sygnał Hybrydowy"]]
 
 # ==========================================
-# UNIWERSALNA HISTORIA (BEZPIECZNE TYPY)
+# HISTORIA BEZ ZBĘDNEJ KOLUMNY KIERUNEK
 # ==========================================
 HISTORY_FILE = "signals_history.csv"
 
@@ -240,19 +230,21 @@ def update_and_log_history(df_ml, df_ta):
     now_date = now_dt.strftime("%Y-%m-%d")
     now_full = now_dt.strftime("%Y-%m-%d %H:%M")
     
+    df_hist = pd.DataFrame()
     if os.path.exists(HISTORY_FILE):
-        try: df_hist = pd.read_csv(HISTORY_FILE)
-        except Exception: df_hist = pd.DataFrame()
-    else: df_hist = pd.DataFrame()
+        try: 
+            df_hist = pd.read_csv(HISTORY_FILE)
+            df_hist["Cena Wejścia"] = pd.to_numeric(df_hist["Cena Wejścia"])
+            df_hist["Ekstremum Ceny"] = pd.to_numeric(df_hist["Ekstremum Ceny"])
+        except Exception:
+            try: os.remove(HISTORY_FILE)
+            except Exception: pass
+            df_hist = pd.DataFrame()
 
-    req_cols = ["Data", "Token", "Typ Sygnału", "Kierunek", "Cena Wejścia", "Ekstremum Ceny", "TP 5%", "TP 7.5%", "TP 10%", "Status"]
+    req_cols = ["Data", "Token", "Typ Sygnału", "Cena Wejścia", "Ekstremum Ceny", "TP 5%", "TP 7.5%", "TP 10%", "Status"]
     for col in req_cols:
         if col not in df_hist.columns:
             df_hist[col] = "-" if "TP" in col else ("🔄 W toku (0/30d)" if col == "Status" else "")
-
-    # Jawna konwersja kolumn numerycznych zapobiegająca błędom typu w pandas
-    df_hist["Cena Wejścia"] = pd.to_numeric(df_hist["Cena Wejścia"], errors="coerce")
-    df_hist["Ekstremum Ceny"] = pd.to_numeric(df_hist["Ekstremum Ceny"], errors="coerce")
 
     price_map = dict(zip(df_ta["Token"], df_ta["Price_Raw"]))
     rsi_1h_map = dict(zip(df_ta["Token"], df_ta["RSI_1H_Raw"]))
@@ -260,14 +252,14 @@ def update_and_log_history(df_ml, df_ta):
     if not df_hist.empty:
         for idx, row in df_hist.iterrows():
             token = row["Token"]
-            kierunek = row.get("Kierunek", "LONG")
+            typ_sig = str(row.get("Typ Sygnału", ""))
+            kierunek = "SHORT" if "SPRZEDAJ" in typ_sig else "LONG"
             
             entry = float(row["Cena Wejścia"]) if pd.notna(row["Cena Wejścia"]) else 0.0
             if entry <= 0: 
                 continue
             
             curr_price = float(price_map.get(token, entry))
-            
             prev_extr = float(row["Ekstremum Ceny"]) if pd.notna(row["Ekstremum Ceny"]) and float(row["Ekstremum Ceny"]) > 0 else entry
             
             if kierunek == "LONG":
@@ -327,7 +319,7 @@ def update_and_log_history(df_ml, df_ta):
 
                 if is_kup and curr_rsi_1h <= 45.0:
                     new_rows.append({
-                        "Data": now_full, "Token": token, "Typ Sygnału": sig, "Kierunek": "LONG",
+                        "Data": now_full, "Token": token, "Typ Sygnału": sig,
                         "Cena Wejścia": price_clean, "Ekstremum Ceny": price_clean,
                         "TP 5%": "-", "TP 7.5%": "-", "TP 10%": "-", "Status": "🔄 W toku (0/30d)"
                     })
@@ -335,7 +327,7 @@ def update_and_log_history(df_ml, df_ta):
 
                 elif is_sprzedaj and curr_rsi_1h >= 65.0:
                     new_rows.append({
-                        "Data": now_full, "Token": token, "Typ Sygnału": sig, "Kierunek": "SHORT",
+                        "Data": now_full, "Token": token, "Typ Sygnału": sig,
                         "Cena Wejścia": price_clean, "Ekstremum Ceny": price_clean,
                         "TP 5%": "-", "TP 7.5%": "-", "TP 10%": "-", "Status": "🔄 W toku (0/30d)"
                     })
@@ -365,7 +357,8 @@ def get_backtest_stats(target_pct_str):
             
         tp_hit = str(row.get(col_tp, "-"))
         status = str(row.get("Status", "-"))
-        kierunek = row.get("Kierunek", "LONG")
+        typ_sig = str(row.get("Typ Sygnału", ""))
+        kierunek = "SHORT" if "SPRZEDAJ" in typ_sig else "LONG"
         
         if kierunek == "LONG":
             max_gain = ((extr_p - entry) / entry) * 100 if entry > 0 else 0.0
@@ -385,7 +378,7 @@ def get_backtest_stats(target_pct_str):
             res_status = f"🔄 W toku (Max: +{round(max_gain, 1)}%)"
 
         results.append({
-            "Data Wejścia": row.get("Data"), "Token": row.get("Token"), "Kierunek": kierunek, "Sygnał": row.get("Typ Sygnału"),
+            "Data Wejścia": row.get("Data"), "Token": row.get("Token"), "Sygnał": typ_sig,
             "Cena Wejścia ($)": fmt(entry), "Ekstremum ($)": fmt(extr_p), "Max Zysk (%)": f"+{round(max_gain, 2)}%",
             f"Cel {target_pct_str}": tp_hit, "Status": res_status
         })
