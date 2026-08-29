@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
+import os
 
 # ==========================================
 # KONFIGURACJA STRONY I LOGOWANIE
@@ -309,6 +310,99 @@ def run_predictions(df_ta, fng_val):
     return df_ml[["Token", "Cena ($)", "Prognoza ML (24h)", "Zasięg Monte Carlo (95%)", "Zasięg Opcji DVOL (95%)", "Implikowana Zmienność (IV)", "Prawdopodobieństwo", "Sygnał Hybrydowy"]]
 
 # ==========================================
+# MODUŁ ŚLEDZENIA SKUTECZNOŚCI (BACKTEST)
+# ==========================================
+HISTORY_FILE = "signals_history.csv"
+
+def log_signals_to_history(df_ml):
+    if df_ml.empty or "Sygnał Hybrydowy" not in df_ml.columns:
+        return
+    
+    now_str = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
+    new_rows = []
+    
+    for _, row in df_ml.iterrows():
+        sig = row["Sygnał Hybrydowy"]
+        if "KUP" in sig or "SPRZEDAJ" in sig:
+            try:
+                price_clean = float(str(row["Cena ($)"]).replace("$", "").replace(",", ""))
+            except Exception:
+                continue
+                
+            new_rows.append({
+                "Data": now_str,
+                "Token": row["Token"],
+                "Typ Sygnału": sig,
+                "Cena Wejścia": price_clean,
+                "Cena Aktualna": price_clean
+            })
+            
+    if not new_rows:
+        return
+        
+    df_new = pd.DataFrame(new_rows)
+    
+    if os.path.exists(HISTORY_FILE):
+        try:
+            df_old = pd.read_csv(HISTORY_FILE)
+            # Zapisujemy tylko unikalne wpisy z danego dnia/godziny dla tokena, żeby nie spamować
+            combined = pd.concat([df_old, df_new]).drop_duplicates(subset=["Data", "Token", "Typ Sygnału"], keep="last")
+            combined.to_csv(HISTORY_FILE, index=False)
+        except Exception:
+            df_new.to_csv(HISTORY_FILE, index=False)
+    else:
+        df_new.to_csv(HISTORY_FILE, index=False)
+
+def get_backtest_stats(df_current_prices):
+    if not os.path.exists(HISTORY_FILE):
+        return pd.DataFrame(), 0, 0, 0.0
+        
+    try:
+        df_hist = pd.read_csv(HISTORY_FILE)
+    except Exception:
+        return pd.DataFrame(), 0, 0, 0.0
+        
+    if df_hist.empty:
+        return df_hist, 0, 0, 0.0
+
+    price_map = dict(zip(df_current_prices["Token"], df_current_prices["Price_Raw"]))
+    
+    results = []
+    wins = 0
+    total = 0
+    
+    for _, row in df_hist.iterrows():
+        token = row["Token"]
+        entry_price = float(row["Cena Wejścia"])
+        sig_type = row["Typ Sygnału"]
+        
+        current_price = price_map.get(token, entry_price)
+        change_pct = ((current_price - entry_price) / entry_price) * 100
+        
+        # Ocena sukcesu: dla KUP chcemy wzrostu, dla SPRZEDAJ spadku
+        if "KUP" in sig_type:
+            is_win = change_pct > 0
+        else:
+            is_win = change_pct < 0
+            
+        if is_win:
+            wins += 1
+        total += 1
+        
+        results.append({
+            "Data": row["Data"],
+            "Token": token,
+            "Sygnał": sig_type,
+            "Cena Wejścia ($)": fmt(entry_price),
+            "Cena Obecna ($)": fmt(current_price),
+            "Wynik (%)": round(change_pct, 2),
+            "Status": "✅ Trafiony" if is_win else "❌ Stratny"
+        })
+        
+    win_rate = round((wins / total) * 100, 1) if total > 0 else 0.0
+    return pd.DataFrame(results), total, wins, win_rate
+
+# ==========================================
 # RAZBUDOWANY RAPORT ANALITYCZNY AI
 # ==========================================
 def generuj_raport_ai(row_ta, row_ml=None):
@@ -320,9 +414,7 @@ def generuj_raport_ai(row_ta, row_ml=None):
     support_str = str(row_ta.get("Wsparcie", "-"))
     resistance_str = str(row_ta.get("Opór", "-"))
     rr = str(row_ta.get("R:R", "-"))
-    szansa = str(row_ta.get("Szansa (%)", "-"))
     vol_str = str(row_ta.get("Wolumen (x)", "1.0x"))
-    okazja = str(row_ta.get("Atrakcyjność (%)", "-"))
     change_24h = row_ta.get("24h (%)", 0.0)
     ema200_val = row_ta.get("EMA200_Raw", 0.0)
     pct_b = float(row_ta.get("%B (BB)", 0.5))
@@ -333,36 +425,14 @@ def generuj_raport_ai(row_ta, row_ml=None):
         trend_desc = "bocznym lub brakuje wyraźnego potwierdzenia kierunku"
 
     if rsi < 30:
-        rsi_desc = f"na ekstremalnie niskim poziomie **{rsi}**. Świadczy to o głębokim wyprzedaniu i potencjalnej rynkowej panice. Sprzedający wyczerpują swoje siły, co często jest preludium do dynamicznego odbicia w górę (tzw. relief rally)."
+        rsi_desc = f"na ekstremalnie niskim poziomie **{rsi}**. Świadczy to o głębokim wyprzedaniu i potencjalnej rynkowej panice."
     elif rsi > 70:
-        rsi_desc = f"na podwyższonym poziomie **{rsi}**. Rynek jest aktualnie mocno wykupiony. Optymizm inwestorów sięga szczytu, przez co drastycznie rośnie ryzyko gwałtownej korekty lub chęci masowej realizacji zysków."
-    elif 45 <= rsi <= 55:
-        rsi_desc = f"na poziomie **{rsi}**, co odpowiada fazie pełnej konsolidacji. Siły popytu i podaży są zrównoważone. Walor czeka na wyraźny impuls zewnętrzny lub napływ nowego kapitału, by określić kierunek wyłamania."
-    elif rsi < 45:
-        rsi_desc = f"na poziomie **{rsi}**, wykazując lekkie przechylenie szali na korzyść niedźwiedzi. Cena osuwa się pod własnym ciężarem, brakuje jej agresywnego popytu."
+        rsi_desc = f"na podwyższonym poziomie **{rsi}**. Rynek jest aktualnie mocno wykupiony, rośnie ryzyko korekty."
     else:
-        rsi_desc = f"na poziomie **{rsi}**, potwierdzając zdrową kontrolę kupujących. Wciąż istnieje bezpieczna przestrzeń na kontynuację trendu wzrostowego, zanim wskaźniki ulegną niebezpiecznemu przegrzaniu."
-
-    vol_raw = float(row_ta.get("Vol_Surge_Raw", 1.0))
-    if vol_raw >= 2.0:
-        vol_desc = f"odnotowano olbrzymią anomalię obrotu (**{vol_str}** standardowej średniej). Do gry wszedł potężny kapitał instytucjonalny, silnie uprawomocniając aktualny kierunek cenowy."
-    elif vol_raw >= 1.2:
-        vol_desc = f"wolumen jest powyżej normy (**{vol_str}** średniej), co wskazuje na przebudzenie kapitału detalicznego i gotowość rynku na większy ruch."
-    elif vol_raw <= 0.6:
-        vol_desc = f"obrót drastycznie zamarł (**{vol_str}** średniej). Aktualne wyceny mogą być zwodnicze ze względu na brak płynności. Nawet małe zlecenia potrafią zachwiać kursem."
-    else:
-        vol_desc = f"rynek handluje przy zachowaniu standardowego obrotu (**{vol_str}** średniej). Brakuje tu niespodziewanych zrywów płynnościowych."
-
-    if pct_b < 0:
-        bb_desc = "Cena drastycznie wyłamała się poniżej dolnej Wstęgi Bollingera. Jest to rzadka anomalia statystyczna i historycznie wymusza silną reakcję powrotną do średniej, tworząc okazję zakupową."
-    elif pct_b > 1:
-        bb_desc = "Cena przebiła górną Wstęgę Bollingera (faza euforii). Istnieje ogromne, bezpośrednie ryzyko szybkiego cofnięcia kursu w poszukiwaniu wsparcia."
-    else:
-        bb_desc = f"Notowania przebywają bezpiecznie w kanale Wstęg Bollingera (wskaźnik %B = {pct_b})."
+        rsi_desc = f"na zrównoważonym poziomie **{rsi}**."
 
     prog, mc, iv, prob, signal = "-", "-", "-", "-", "-"
     prob_num = 50.0
-    iv_num = 50.0
     
     if row_ml is not None:
         prog = str(row_ml.get("Prognoza ML (24h)", "-"))
@@ -370,71 +440,46 @@ def generuj_raport_ai(row_ta, row_ml=None):
         iv = str(row_ml.get("Implikowana Zmienność (IV)", "-"))
         prob = str(row_ml.get("Prawdopodobieństwo", "-"))
         signal = str(row_ml.get("Sygnał Hybrydowy", "-"))
-
         try:
             prob_num = float(prob.replace("%", ""))
-            iv_num = float(iv.replace("%", ""))
         except Exception:
             pass
 
-    if iv_num > 60.0:
-        zmiennosc_desc = "Jest ekstremalnie wysoka. Rynek może wykonać bardzo agresywne ruchy wymiatające zabezpieczenia w obu kierunkach."
-    elif iv_num > 35.0:
-        zmiennosc_desc = "Utrzymuje się na umiarkowanym poziomie. Idealne, standardowe środowisko dla rynku kryptowalut."
-    else:
-        zmiennosc_desc = "Pozostaje zadziwiająco niska. Możemy mieć do czynienia ze zjawiskiem kompresji zmienności (ciszy przed burzą)."
-
     if prob_num > 55:
-        scenariusz = f"Najbardziej prawdopodobnym wydarzeniem w perspektywie najbliższych sesji jest **zdecydowany atak kapitału w kierunku wyznaczonego oporu przy cenie ${resistance_str}**. Obliczenia modeli hybrydowych zdecydowanie faworyzują kupujących, a ewentualne mniejsze korekty powinny być szybko pochłaniane przez popyt."
+        scenariusz = f"Najbardziej prawdopodobnym wydarzeniem jest **zdecydowany atak kapitału w kierunku oporu ${resistance_str}**."
     elif prob_num < 45:
-        scenariusz = f"Najbardziej realistycznym wariantem jest **dalsze osuwanie się kursu i krytyczny test wsparcia przy poziomie ${support_str}**. Symulacje ostrzegają przed słabością, kapitulacją kapitału oraz możliwością pogłębienia się strat."
+        scenariusz = f"Najbardziej realistycznym wariantem jest **dalsze osuwanie się kursu i test wsparcia ${support_str}**."
     else:
-        scenariusz = f"Brak wyrazistego rozstrzygnięcia. Kurs najpewniej utknie w **bocznym przedziale nakreślonym przez statystykę Monte Carlo ({mc})**. Bez silnego impulsu makroekonomicznego rynek przeczeka ten czas w zawieszeniu."
+        scenariusz = f"Kurs najpewniej utknie w **bocznym przedziale ({mc})**."
 
     pewnosc = max(prob_num, 100 - prob_num)
     if "KUP (Mocny)" in signal:
         decyzja = "🟢 **ZDECYDOWANIE KUPUJ**"
-        uzasadnienie = "Wykryto rzadką i silną synergię pozytywnych wskaźników. Cena jest w korzystnym układzie, poparta mocnym prawdopodobieństwem w modelach uczenia maszynowego oraz sensownym stosunkiem Zysku do Ryzyka."
     elif "KUP (Słaby)" in signal:
         decyzja = "📈 **KUPUJ OSTROŻNIE (DCA)**"
-        uzasadnienie = "Istnieje matematyczna przewaga dla wzrostów, ale rynek nie ma wystarczającego impetu płynnościowego. Optymalne jest kupowanie waloru w mniejszych, rozbitych partiach (DCA) zamiast pełnym kapitałem od razu."
     elif "SPRZEDAJ" in signal:
         decyzja = "🔴 **NIE KUPUJ / SPRZEDAWAJ**"
-        uzasadnienie = "Model kategorycznie odradza zakupy na obecnych poziomach. Ryzyko obsuwy przewyższa drastycznie potencjał zysku ze względu na przegrzanie lub brak zainteresowania po stronie popytu."
     else:
         decyzja = "⏳ **WSTRZYMAJ SIĘ / CZEKAJ**"
-        uzasadnienie = "Szanse na sukces wynoszą około 50/50. Gra w tym momencie na rynku Spot to rzucanie monetą. Profesjonalny inwestor chroni kapitał dopóki nie otrzyma twardego przeważającego sygnału."
 
     return f"""
-📑 **KOMPLEKSOWY RAPORT EKSPERCKI AI: {symbol}**
+📑 **RAPORT AI: {symbol}** (${price_str}, Zmiana 24h: {change_24h}%)
+Trend strukturalny: **{trend_desc}**
 
-Bieżąca wycena kryptowaluty {symbol} wynosi **${price_str}** (dobowa zmiana: **{change_24h}%**). W szerszym ujęciu strukturalnym, walor pozostaje w układzie **{trend_desc}**.
-
-**1. Kondycja Techniczna i Behawioralna (TA):**
-* **Struktura Momentum (RSI):** Oscylator utrzymuje się {rsi_desc}
-* **Dynamika Odchyleń (%B):** {bb_desc}
-* **Aktywność i Płynność:** Pod względem wolumenu {vol_desc}
-
-**2. Symulacja Przewidywań i Obliczenia Statystyczne:**
-Zaawansowane modele ML przetworzyły układ cenowy, zwracając następujące predykcje w oknie 24-godzinnym:
-* **Obliczone Prawdopodobieństwo Sukcesu (Wzrostu):** **{prob}**
-* **Statystyczny Zasięg Ruchu (95% ufności):** Zgodnie z rozkładem Monte Carlo oczekuje się wędrówki ceny w korytarzu **{mc}**.
-* **Implikowane Oczekiwane Ryzyko (IV):** {iv}. {zmiennosc_desc}
+* **Momentum (RSI):** {rsi_desc}
+* **Prawdopodobieństwo Sukcesu:** **{prob}**
+* **Zasięg Symulacji (Monte Carlo):** {mc}
 
 ---
-
 🔮 **NAJBARDZIEJ PRAWDOPODOBNA PRZYSZŁOŚĆ**
 {scenariusz}
 
 ---
-
-💡 **PODSUMOWANIE I OSTATECZNA REKOMENDACJA**
-
-* **Werdykt Decyzyjny:** {decyzja}
-* **Statystyczna Pewność Sygnału:** **{pewnosc:.1f}%**
+💡 **WERDYKT I REKOMENDACJA**
+* **Decyzja:** {decyzja}
+* **Pewność Sygnału:** **{pewnosc:.1f}%**
 * **Stosunek Zysku do Ryzyka (R:R):** {rr}
-* **Dlaczego taka decyzja?** {uzasadnienie}
-* **Kluczowy Warunek Bezpieczeństwa:** Jeśli decydujesz się na otworzenie transakcji długiej (Spot), system wymaga **bezwzględnego zlecenia Stop Loss na poziomie ${sl_str}**. To jedyny sposób na zabezpieczenie przed niespodziewanym załamaniem trendu.
+* **Wymagany Stop Loss:** Ustaw bezwzględnie na poziomie **${sl_str}**.
 """
 
 # ==========================================
@@ -463,7 +508,7 @@ with col_fng:
 
 if not df_ta.empty:
     st.markdown("---")
-    selected_token = st.selectbox("📱 Szybki podgląd wybranego tokena (dla wygody na telefonie):", df_ta["Token"].tolist())
+    selected_token = st.selectbox("📱 Szybki podgląd wybranego tokena:", df_ta["Token"].tolist())
     token_row = df_ta[df_ta["Token"] == selected_token].iloc[0]
     
     m1, m2, m3, m4, m5 = st.columns(5)
@@ -479,15 +524,35 @@ if st.button("🔄 Odśwież dane rynkowe", type="primary"):
     st.rerun()
 
 df_ml = run_predictions(df_ta, fng_val)
+log_signals_to_history(df_ml) # Automatyczny zapis sygnałów do bintestu
+
 df_ta_clean = df_ta.drop(columns=["RawScore", "Vol_Surge_Raw", "Price_Raw", "EMA200_Raw", "BTC_D1_Price", "BTC_D1_EMA200"], errors="ignore")
 
-tab1, tab2 = st.tabs(["1. Tabela Techniczna Spot", "2. Sygnały Hybrydowe & Monte Carlo"])
+# ZAKŁADKI APLIKACJI
+tab1, tab2, tab3 = st.tabs(["1. Tabela Techniczna Spot", "2. Sygnały Hybrydowe & Monte Carlo", "3. Skuteczność Sygnałów (Backtest)"])
 
 with tab1:
     st.dataframe(df_ta_clean.style.map(lambda v: 'color: #2e7d32; font-weight: bold;' if isinstance(v, (int, float)) and v > 0 else ('color: #c62828; font-weight: bold;' if isinstance(v, (int, float)) and v < 0 else ''), subset=['24h (%)']), use_container_width=True)
 
 with tab2:
     st.dataframe(df_ml, use_container_width=True)
+
+with tab3:
+    st.subheader("📈 Analiza Historyczna Skuteczności Sygnałów")
+    st.caption("Modulator weryfikuje, jak wygenerowane wcześniej sygnały radzą sobie w zetknięciu z aktualnymi cenami rynkowymi.")
+    
+    bt_df, total_sigs, win_sigs, win_rate = get_backtest_stats(df_ta)
+    
+    if total_sigs > 0:
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Łącznie Sygnałów", total_sigs)
+        k2.metric("Trafione Sygnały", win_sigs)
+        k3.metric("Skuteczność (Win Rate)", f"{win_rate}%")
+        
+        st.markdown("---")
+        st.dataframe(bt_df, use_container_width=True)
+    else:
+        st.info("Brak zapisanej historii. Sygnały zaczną się zbierać automatycznie po kolejnych odświeżeniach danych.")
 
 # ==========================================
 # RAPORT ANALITYCZNY AI
