@@ -529,7 +529,7 @@ log_signals_to_history(df_ml)
 
 df_ta_clean = df_ta.drop(columns=["RawScore", "Vol_Surge_Raw", "Price_Raw", "EMA200_Raw", "BTC_D1_Price", "BTC_D1_EMA200"], errors="ignore")
 
-# ZAKŁADKI APLIKACJI (Dodana 4. zakładka Archiwum)
+# ZAKŁADKI APLIKACJI
 tab1, tab2, tab3, tab4 = st.tabs([
     "1. Tabela Techniczna Spot", 
     "2. Sygnały Hybrydowe & Monte Carlo", 
@@ -565,7 +565,7 @@ with tab3:
 
 with tab4:
     st.subheader("🗂️ Pełne Archiwum Wygenerowanych Sygnałów")
-    st.caption("Przeglądaj wszystkie historyczne wpisy zapisane w systemie. Możesz filtrować po interesującym Cię tokenie.")
+    st.caption("Przeglądaj wszystkie historyczne wpisy zapisane w systemie wraz z aktualnym stanem rynku.")
     
     if os.path.exists(HISTORY_FILE):
         try:
@@ -574,22 +574,29 @@ with tab4:
             df_history_raw = pd.DataFrame()
             
         if not df_history_raw.empty:
-            # Filtry w zakładce Archiwum
+            bt_df_full, _, _, _ = get_backtest_stats(df_ta, target_pct=5.0)
+            
+            if not bt_df_full.empty:
+                df_display_archive = bt_df_full.copy()
+            else:
+                df_display_archive = df_history_raw.copy()
+
             f_col1, f_col2 = st.columns(2)
             
-            all_tokens_in_hist = ["Wszystkie"] + sorted(df_history_raw["Token"].unique().tolist())
-            selected_filter_token = f_col1.selectbox("Filtruj po tokenie:", all_tokens_in_hist)
+            all_tokens_in_hist = ["Wszystkie"] + sorted(df_display_archive["Token"].unique().tolist())
+            selected_filter_token = f_col1.selectbox("Filtruj po tokenie:", all_tokens_in_hist, key="arch_token_filter")
             
-            all_types = ["Wszystkie"] + sorted(df_history_raw["Typ Sygnału"].unique().tolist())
-            selected_filter_type = f_col2.selectbox("Filtruj po typie sygnału:", all_types)
+            sig_col_name = "Sygnał" if "Sygnał" in df_display_archive.columns else "Typ Sygnału"
+            all_types = ["Wszystkie"] + sorted(df_display_archive[sig_col_name].unique().tolist())
+            selected_filter_type = f_col2.selectbox("Filtruj po typie sygnału:", all_types, key="arch_type_filter")
             
-            df_filtered = df_history_raw.copy()
+            df_filtered = df_display_archive.copy()
             if selected_filter_token != "Wszystkie":
                 df_filtered = df_filtered[df_filtered["Token"] == selected_filter_token]
             if selected_filter_type != "Wszystkie":
-                df_filtered = df_filtered[df_filtered["Typ Sygnału"] == selected_filter_type]
+                df_filtered = df_filtered[df_filtered[sig_col_name] == selected_filter_type]
                 
-            st.info(f"Wyświetlam {len(df_filtered)} z {len(df_history_raw)} wpisów w archiwum.")
+            st.info(f"Wyświetlam {len(df_filtered)} z {len(df_display_archive)} wpisów w archiwum.")
             st.dataframe(df_filtered.sort_values(by="Data", ascending=False), use_container_width=True)
         else:
             st.info("Plik historii jest pusty.")
