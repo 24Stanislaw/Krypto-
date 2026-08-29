@@ -319,6 +319,15 @@ def log_signals_to_history(df_ml):
         return
     
     now_str = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
+    
+    existing_rows = []
+    if os.path.exists(HISTORY_FILE):
+        try:
+            df_old = pd.read_csv(HISTORY_FILE)
+            existing_rows = df_old.to_dict(orient="records")
+        except Exception:
+            pass
+            
     new_rows = []
     
     for _, row in df_ml.iterrows():
@@ -329,12 +338,27 @@ def log_signals_to_history(df_ml):
             except Exception:
                 continue
                 
-            new_rows.append({
-                "Data": now_str,
-                "Token": row["Token"],
-                "Typ Sygnału": sig,
-                "Cena Wejścia": price_clean
-            })
+            token = row["Token"]
+            
+            is_already_open = False
+            for old in existing_rows:
+                if old.get("Token") == token and old.get("Typ Sygnału") == sig:
+                    try:
+                        old_date = pd.to_datetime(old.get("Data"))
+                        days_passed = (pd.Timestamp.now() - old_date).days
+                        if days_passed <= 30:
+                            is_already_open = True
+                            break
+                    except Exception:
+                        pass
+            
+            if not is_already_open:
+                new_rows.append({
+                    "Data": now_str,
+                    "Token": token,
+                    "Typ Sygnału": sig,
+                    "Cena Wejścia": price_clean
+                })
             
     if not new_rows:
         return
@@ -484,9 +508,12 @@ Trend strukturalny: **{trend_desc}**
 """
 
 # ==========================================
-# INTERFEJS UŻYTKOWNIKA (UI)
+# INTERFEJS UŻYTKOWNIKA (UI) Z SPINNEREM
 # ==========================================
-df_ta, fng_val, fng_class, btc_dom, btc_d1_price, btc_d1_ema200, loaded_count, total_count = fetch_technical_analysis()
+with st.spinner("🔄 Pobieram dane rynkowe i generuję analizę..."):
+    df_ta, fng_val, fng_class, btc_dom, btc_d1_price, btc_d1_ema200, loaded_count, total_count = fetch_technical_analysis()
+    df_ml = run_predictions(df_ta, fng_val)
+    log_signals_to_history(df_ml)
 
 col_title, col_btc_macro, col_dom, col_fng = st.columns([2.0, 1.1, 0.9, 1.0])
 with col_title:
@@ -523,9 +550,6 @@ st.markdown("---")
 if st.button("🔄 Odśwież dane rynkowe", type="primary"):
     st.cache_data.clear()
     st.rerun()
-
-df_ml = run_predictions(df_ta, fng_val)
-log_signals_to_history(df_ml)
 
 df_ta_clean = df_ta.drop(columns=["RawScore", "Vol_Surge_Raw", "Price_Raw", "EMA200_Raw", "BTC_D1_Price", "BTC_D1_EMA200"], errors="ignore")
 
@@ -598,6 +622,16 @@ with tab4:
                 
             st.info(f"Wyświetlam {len(df_filtered)} z {len(df_display_archive)} wpisów w archiwum.")
             st.dataframe(df_filtered.sort_values(by="Data", ascending=False), use_container_width=True)
+            
+            # Dodany przycisk pobierania pliku CSV na telefon / komputer
+            st.markdown("---")
+            with open(HISTORY_FILE, "rb") as f:
+                st.download_button(
+                    label="📥 Pobierz pełne archiwum (CSV)",
+                    data=f,
+                    file_name="archiwum_sygnalow.csv",
+                    mime="text/csv"
+                )
         else:
             st.info("Plik historii jest pusty.")
     else:
