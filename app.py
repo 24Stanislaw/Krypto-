@@ -226,8 +226,8 @@ def run_predictions(df_ta, fng_val):
         ])
 
     df_ml = df_ta.copy()
-    df_ml[["Prognoza ML (24h)", "Zasięg Monte Carlo (95%)", "Zasięg Opcji DVOL (95%)", "Implikowana Zmienność (IV)", "Prawdopodobieństwo", "Sygnał Hybrydowy"]] = df_ml.apply(analyze_row, axis=1)
-    return df_ml[["Token", "Cena ($)", "Prognoza ML (24h)", "Zasięg Monte Carlo (95%)", "Zasięg Opcji DVOL (95%)", "Implikowana Zmienność (IV)", "Prawdopodobieństwo", "Sygnał Hybrydowy"]]
+    df_ml[["Symulacja Monte Carlo (24h)", "Zasięg Monte Carlo (95%)", "Zasięg Opcji DVOL (95%)", "Implikowana Zmienność (IV)", "Prawdopodobieństwo", "Sygnał Hybrydowy"]] = df_ml.apply(analyze_row, axis=1)
+    return df_ml[["Token", "Cena ($)", "Symulacja Monte Carlo (24h)", "Zasięg Monte Carlo (95%)", "Zasięg Opcji DVOL (95%)", "Implikowana Zmienność (IV)", "Prawdopodobieństwo", "Sygnał Hybrydowy"]]
 
 # ==========================================
 # HISTORIA I BACKTEST (30 DNI LUB TP/SL)
@@ -249,16 +249,16 @@ def log_signals_to_history(df_ml, df_ta):
 
     price_map = dict(zip(df_ta["Token"], df_ta["Price_Raw"]))
     
-    # Sprawdzamy, które pozycje są obecnie OTWARTE (czyli trwają krócej niż 30 dni i nie uderzyły w TP/SL na poziomie ±5%)
     active_tokens = set()
     for row in existing_rows:
-        token = row["Token"]
-        entry = float(row["Cena Wejścia"])
-        start_date = pd.to_datetime(row["Data"])
+        token = row.get("Token")
+        if not token: continue
+        entry = float(row.get("Cena Wejścia", 0))
+        start_date = pd.to_datetime(row.get("Data"))
         days_passed = (pd.Timestamp.now() - start_date).days
         
         curr = float(price_map.get(token, entry))
-        change_pct = ((curr - entry) / entry) * 100
+        change_pct = ((curr - entry) / entry) * 100 if entry > 0 else 0
         
         is_closed = (days_passed >= 30) or (change_pct >= 5.0) or (change_pct <= -5.0)
         if not is_closed:
@@ -269,20 +269,20 @@ def log_signals_to_history(df_ml, df_ta):
         sig = row["Sygnał Hybrydowy"]
         if "KUP" in sig or "SPRZEDAJ" in sig:
             token = row["Token"]
-            # Zapisz tylko wtedy, gdy ten token NIE ma obecnie aktywnej pozycji w historii
             if token not in active_tokens:
                 try: 
                     price_clean = float(str(row["Cena ($)"]).replace("$", "").replace(",", ""))
-                except: 
+                except Exception: 
                     continue
                 
                 new_rows.append({"Data": now_full, "Token": token, "Typ Sygnału": sig, "Cena Wejścia": price_clean})
-                active_tokens.add(token) # Blokada przed zdublowaniem w tej samej sesji
+                active_tokens.add(token)
                 
     if new_rows:
         df_new = pd.DataFrame(new_rows)
         if os.path.exists(HISTORY_FILE) and existing_rows:
-            combined_df = pd.concat([pd.DataFrame(existing_rows), df_new])
+            clean_existing = pd.DataFrame(existing_rows).drop(columns=["Cena Aktualna"], errors="ignore")
+            combined_df = pd.concat([clean_existing, df_new], ignore_index=True)
             combined_df.to_csv(HISTORY_FILE, index=False)
         else:
             df_new.to_csv(HISTORY_FILE, index=False)
@@ -290,14 +290,15 @@ def log_signals_to_history(df_ml, df_ta):
 def get_backtest_stats(df_current_prices, target_pct=5.0):
     if not os.path.exists(HISTORY_FILE): return pd.DataFrame(), 0, 0, 0.0
     try: df_hist = pd.read_csv(HISTORY_FILE)
-    except: return pd.DataFrame(), 0, 0, 0.0
+    except Exception: return pd.DataFrame(), 0, 0, 0.0
     if df_hist.empty: return df_hist, 0, 0, 0.0
 
     price_map = dict(zip(df_current_prices["Token"], df_current_prices["Price_Raw"]))
     results, wins, total = [], 0, 0
     
     for _, row in df_hist.iterrows():
-        token, entry, sig_type = row["Token"], float(row["Cena Wejścia"]), row["Typ Sygnału"]
+        token, entry, sig_type = row.get("Token"), float(row.get("Cena Wejścia", 0)), row.get("Typ Sygnału")
+        if not token or entry == 0: continue
         curr = float(price_map.get(token, entry))
         change_pct = ((curr - entry) / entry) * 100
         
@@ -339,23 +340,22 @@ def generuj_raport_ai(row_ta, row_ml=None):
     
     trend_desc = "wzrostowym (Cena powyżej EMA 200)" if price_raw > ema_raw else "spadkowym/bocznym (Cena poniżej EMA 200)"
 
-    prob_str, prognoza_ml, zasieg_mc, signal = "50.0%", "-", "-", "⏳ CZEKAJ"
+    prob_str, prognoza_mc, signal = "50.0%", "-", "⏳ CZEKAJ"
     if row_ml is not None:
-        prognoza_ml = row_ml.get("Prognoza ML (24h)")
-        zasieg_mc = row_ml.get("Zasięg Monte Carlo (95%)")
+        prognoza_mc = row_ml.get("Symulacja Monte Carlo (24h)")
         prob_str = row_ml.get("Prawdopodobieństwo")
         signal = row_ml.get("Sygnał Hybrydowy")
         
     try:
         prob_val = float(str(prob_str).replace("%", ""))
-    except:
+    except Exception:
         prob_val = 50.0
 
     return f"""
 ### 📑 RAPORT AI: {symbol} (${price_str}, Zmiana 24h: {change_24h}%)
 * **Trend strukturalny:** {trend_desc}
 * **Momentum (RSI):** {rsi} | **Wstęgi Bollingera (%B):** {pct_b:.2f}
-* **Prognoza ML (24h):** {prognoza_ml} | **Szansa na sukces:** **{prob_val}%**
+* **Symulacja Monte Carlo (24h):** {prognoza_mc} | **Szansa na sukces:** **{prob_val}%**
 * **Poziomy krytyczne:** Wsparcie: `${support_str}` | Opór: `${resistance_str}` | Stop Loss: `${sl_str}`
 * **R:R:** `{rr}` | **Sygnał:** {signal}
 """
@@ -439,11 +439,15 @@ with tab3:
 with tab4:
     st.subheader("🗂️ Archiwum Sygnałów")
     if os.path.exists(HISTORY_FILE):
-        df_hist = pd.read_csv(HISTORY_FILE)
-        if not df_hist.empty:
-            st.dataframe(df_hist.sort_values(by="Data", ascending=False), use_container_width=True)
-        else:
-            st.info("Archiwum jest puste.")
+        try:
+            df_hist = pd.read_csv(HISTORY_FILE)
+            if not df_hist.empty:
+                df_hist_clean = df_hist.drop(columns=["Cena Aktualna"], errors="ignore")
+                st.dataframe(df_hist_clean.sort_values(by="Data", ascending=False), use_container_width=True)
+            else:
+                st.info("Archiwum jest puste.")
+        except Exception:
+            st.info("Błąd odczytu archiwum.")
     else:
         st.info("Brak pliku historii.")
 
