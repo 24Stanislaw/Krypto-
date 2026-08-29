@@ -80,7 +80,6 @@ def get_global_market_data():
     except Exception:
         return 55.0
 
-# Świece 1H
 def fetch_from_coinbase(symbol_pair):
     url = f"https://api.exchange.coinbase.com/products/{symbol_pair}/candles?granularity=3600"
     res = requests.get(url, headers={"User-Agent": "CryptoDashboard/1.0"}, timeout=4)
@@ -106,7 +105,6 @@ def get_candles_1h(token_info):
             pass
     return fetch_from_coingecko(token_info['gecko_id'])
 
-# Resampling danych 1h do wyższych interwałów (2h, 4h, 12h)
 def resample_ohlc(df_1h, rule):
     df = df_1h.copy()
     df.set_index('dt', inplace=True)
@@ -173,7 +171,6 @@ def fetch_technical_analysis():
             reward = resistance - price
             rr_val = round(reward / risk, 1) if risk > 0 and reward > 0 else 0.1
 
-            # Konsensus MTF
             mtf_score = 0
             if rsi_1h <= 45: mtf_score += 1
             if rsi_2h <= 48: mtf_score += 1
@@ -201,11 +198,10 @@ def run_predictions(df_ta, fng_val):
     if df_ta.empty:
         return pd.DataFrame()
 
-    dvol_btc = get_deribit_dvol("BTC")
     rng = np.random.default_rng(seed=int(pd.Timestamp.now().strftime("%Y%m%d%H")))
 
     def analyze_row(row):
-        symbol, price, atr = row["Token"], float(row["Price_Raw"]), float(row["ATR"])
+        price, atr = float(row["Price_Raw"]), float(row["ATR"])
         rsi_1h, rsi_4h, rsi_12h, mtf_score = float(row["RSI_1H_Raw"]), float(row["RSI_4H_Raw"]), float(row["RSI_12H_Raw"]), int(row["MTF_Score"])
         
         expected_change = ((48.0 - rsi_4h) * 0.002) + ((50.0 - rsi_1h) * 0.001)
@@ -215,7 +211,6 @@ def run_predictions(df_ta, fng_val):
         final_prices = price * np.exp(np.cumsum(shocks, axis=1))[:, -1]
         prob = np.mean(final_prices > price) * 100
 
-        # Kryteria Sygnału oparte na MTF (KUP i SPRZEDAJ)
         if mtf_score >= 3 and rsi_12h <= 60 and rsi_1h <= 45:
             signal = "🟢 KUP (Mocny MTF)"
         elif mtf_score >= 2 and rsi_1h <= 40:
@@ -236,7 +231,7 @@ def run_predictions(df_ta, fng_val):
     return df_ml[["Token", "Cena ($)", "RSI 1H", "RSI 4H", "RSI 12H", "MTF Zgoda", "Prognoza MC (24h)", "Zasięg Monte Carlo (95%)", "Prawdopodobieństwo", "Sygnał Hybrydowy"]]
 
 # ==========================================
-# UNIWERSALNA HISTORIA (KUP & SPRZEDAJ)
+# UNIWERSALNA HISTORIA (BEZPIECZNE PARSOWANIE)
 # ==========================================
 HISTORY_FILE = "signals_history.csv"
 
@@ -258,23 +253,37 @@ def update_and_log_history(df_ml, df_ta):
     price_map = dict(zip(df_ta["Token"], df_ta["Price_Raw"]))
     rsi_1h_map = dict(zip(df_ta["Token"], df_ta["RSI_1H_Raw"]))
 
-    # 1. Aktualizacja otwartych pozycji
     if not df_hist.empty:
         for idx, row in df_hist.iterrows():
             token = row["Token"]
             kierunek = row.get("Kierunek", "LONG")
-            try: entry = float(row["Cena Wejścia"])
-            except Exception: continue
-            if entry <= 0: continue
+            
+            try: 
+                entry = float(row["Cena Wejścia"])
+            except Exception: 
+                continue
+            if entry <= 0: 
+                continue
             
             curr_price = float(price_map.get(token, entry))
-            prev_extr = float(row["Ekstremum Ceny"]) if pd.notna(row["Ekstremum Ceny"]) and str(row["Ekstremum Ceny"]) != "-" and float(row["Ekstremum Ceny"]) > 0 else entry
+            
+            # Bezpieczne pobieranie ekstremum ceny z zabezpieczeniem przed błędami typu string/NaN
+            try:
+                raw_extr = row["Ekstremum Ceny"]
+                if pd.notna(raw_extr) and str(raw_extr) != "-":
+                    prev_extr = float(raw_extr)
+                else:
+                    prev_extr = entry
+            except Exception:
+                prev_extr = entry
+            if prev_extr <= 0:
+                prev_extr = entry
             
             if kierunek == "LONG":
                 new_extr = max(prev_extr, curr_price)
                 max_gain_pct = ((new_extr - entry) / entry) * 100
                 curr_gain_pct = ((curr_price - entry) / entry) * 100
-            else: # SHORT / SPRZEDAJ
+            else: 
                 new_extr = min(prev_extr, curr_price) if prev_extr > 0 else curr_price
                 max_gain_pct = ((entry - new_extr) / entry) * 100
                 curr_gain_pct = ((entry - curr_price) / entry) * 100
@@ -285,24 +294,31 @@ def update_and_log_history(df_ml, df_ta):
             if max_gain_pct >= 7.5 and str(row["TP 7.5%"]) == "-": df_hist.at[idx, "TP 7.5%"] = f"✅ {now_date}"
             if max_gain_pct >= 10.0 and str(row["TP 10%"]) == "-": df_hist.at[idx, "TP 10%"] = f"✅ {now_date}"
             
-            start_date = pd.to_datetime(row["Data"])
-            days_passed = (now_dt - start_date).days
+            try:
+                start_date = pd.to_datetime(row["Data"])
+                days_passed = (now_dt - start_date).days
+            except Exception:
+                days_passed = 0
             
             if max_gain_pct >= 10.0: df_hist.at[idx, "Status"] = "🎯 Zaliczone TP 10%"
             elif curr_gain_pct <= -5.0: df_hist.at[idx, "Status"] = "❌ SL (-5%)"
             elif days_passed >= 30: df_hist.at[idx, "Status"] = "⏱️ Wygasło (30d)"
             else: df_hist.at[idx, "Status"] = f"🔄 W toku ({days_passed}/30d)"
 
-    # 2. Blokada dubli (Śledzenie aktywnych pozycji)
     active_tokens = set()
     last_signal_time = {}
     if not df_hist.empty:
         for _, row in df_hist.iterrows():
-            tok, dt_val = row["Token"], pd.to_datetime(row["Data"])
-            if tok not in last_signal_time or dt_val > last_signal_time[tok]: last_signal_time[tok] = dt_val
-            if "W toku" in str(row["Status"]): active_tokens.add(tok)
+            tok = row["Token"]
+            try:
+                dt_val = pd.to_datetime(row["Data"])
+                if tok not in last_signal_time or dt_val > last_signal_time[tok]: 
+                    last_signal_time[tok] = dt_val
+            except Exception:
+                pass
+            if "W toku" in str(row["Status"]): 
+                active_tokens.add(tok)
 
-    # 3. Rejestracja nowych sygnałów
     new_rows = []
     if not df_ml.empty and "Sygnał Hybrydowy" in df_ml.columns:
         for _, row in df_ml.iterrows():
@@ -350,10 +366,14 @@ def get_backtest_stats(target_pct_str):
     wins, total, results = 0, 0, []
 
     for _, row in df_hist.iterrows():
-        entry = float(row.get("Cena Wejścia", 0))
+        try:
+            entry = float(row.get("Cena Wejścia", 0))
+            extr_p = float(row.get("Ekstremum Ceny", entry))
+        except Exception:
+            continue
+            
         tp_hit = str(row.get(col_tp, "-"))
         status = str(row.get("Status", "-"))
-        extr_p = float(row.get("Ekstremum Ceny", entry))
         kierunek = row.get("Kierunek", "LONG")
         
         if kierunek == "LONG":
@@ -467,7 +487,6 @@ with col_btn2:
 
 df_ta_clean = df_ta.drop(columns=["RawScore", "Price_Raw", "EMA200_Raw", "RSI_1H_Raw", "RSI_4H_Raw", "RSI_12H_Raw", "MTF_Score"], errors="ignore")
 
-# Podział Zakładek
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "1. Tabela Techniczna MTF", 
     "2. Sygnały Hybrydowe", 
