@@ -170,7 +170,7 @@ def fetch_technical_analysis():
             lower_bb = sma20 - (std20 * 2)
             pct_b = (price - lower_bb) / (upper_bb - lower_bb + 1e-9)
 
-            # --- POPRAWKA WOLUMENU (ostatnia zamknięta świeca) ---
+            # Bezpieczne obliczanie wolumenu na podstawie ostatniej ZAMKNIĘTEJ świecy
             if len(df) > 2 and df['volume'].sum() > 0:
                 vol_ma = df['volume'].iloc[:-1].rolling(min(20, len(df)-1)).mean().iloc[-1]
                 last_vol = df['volume'].iloc[-2]
@@ -309,41 +309,140 @@ def run_predictions(df_ta, fng_val):
     
     return df_ml[["Token", "Cena ($)", "Prognoza ML (24h)", "Zasięg Monte Carlo (95%)", "Zasięg Opcji DVOL (95%)", "Implikowana Zmienność (IV)", "Prawdopodobieństwo", "Sygnał Hybrydowy"]]
 
+# ==========================================
+# RAZBUDOWANY RAPORT ANALITYCZNY AI
+# ==========================================
 def generuj_raport_ai(row_ta, row_ml=None):
     symbol = row_ta.get("Token", "Token")
-    price = row_ta.get("Cena ($)", "-")
-    rsi = row_ta.get("RSI", 50.0)
-    sl = row_ta.get("SL (ATR)", "-")
-    resistance = row_ta.get("Opór", "-")
-    rr = row_ta.get("R:R", "-")
-    szansa = row_ta.get("Szansa (%)", "-")
-    vol = row_ta.get("Wolumen (x)", "1.0x")
-    okazja = row_ta.get("Atrakcyjność (%)", "-")
+    price_val = row_ta.get("Price_Raw", 0.0)
+    price_str = str(row_ta.get("Cena ($)", "-"))
+    rsi = float(row_ta.get("RSI", 50.0))
+    sl_str = str(row_ta.get("SL (ATR)", "-"))
+    support_str = str(row_ta.get("Wsparcie", "-"))
+    resistance_str = str(row_ta.get("Opór", "-"))
+    rr = str(row_ta.get("R:R", "-"))
+    szansa = str(row_ta.get("Szansa (%)", "-"))
+    vol_str = str(row_ta.get("Wolumen (x)", "1.0x"))
+    okazja = str(row_ta.get("Atrakcyjność (%)", "-"))
+    change_24h = row_ta.get("24h (%)", 0.0)
+    ema200_val = row_ta.get("EMA200_Raw", 0.0)
+    pct_b = float(row_ta.get("%B (BB)", 0.5))
 
-    if isinstance(rsi, (float, int)):
-        if rsi < 30:
-            rsi_desc = "jest mocno wyprzedany (strefa potencjalnej okazji)"
-        elif rsi > 70:
-            rsi_desc = "jest mocno wykupiony (podwyższone ryzyko korekty)"
-        else:
-            rsi_desc = "znajduje się w zbalansowanej, neutralnej strefie"
+    # Analiza szerszego trendu (EMA 200)
+    if isinstance(price_val, (float, int)) and isinstance(ema200_val, (float, int)) and ema200_val > 0:
+        trend_desc = "wzrostowym (cena znajduje się powyżej kluczowej średniej EMA 200, co historycznie faworyzuje długie pozycje)" if price_val > ema200_val else "spadkowym (cena poniżej EMA 200 generuje techniczną presję podażową)"
     else:
-        rsi_desc = "brak danych"
+        trend_desc = "bocznym lub brakuje wyraźnego potwierdzenia kierunku"
 
-    ml_txt = ""
+    # Rozbudowana Analiza RSI
+    if rsi < 30:
+        rsi_desc = f"na ekstremalnie niskim poziomie **{rsi}**. Świadczy to o głębokim wyprzedaniu i potencjalnej rynkowej panice. Sprzedający wyczerpują swoje siły, co często jest preludium do dynamicznego odbicia w górę (tzw. relief rally)."
+    elif rsi > 70:
+        rsi_desc = f"na podwyższonym poziomie **{rsi}**. Rynek jest aktualnie mocno wykupiony. Optymizm inwestorów sięga szczytu, przez co drastycznie rośnie ryzyko gwałtownej korekty lub chęci masowej realizacji zysków."
+    elif 45 <= rsi <= 55:
+        rsi_desc = f"na poziomie **{rsi}**, co odpowiada fazie pełnej konsolidacji. Siły popytu i podaży są zrównoważone. Walor czeka na wyraźny impuls zewnętrzny lub napływ nowego kapitału, by określić kierunek wyłamania."
+    elif rsi < 45:
+        rsi_desc = f"na poziomie **{rsi}**, wykazując lekkie przechylenie szali na korzyść niedźwiedzi. Cena osuwa się pod własnym ciężarem, brakuje jej agresywnego popytu."
+    else:
+        rsi_desc = f"na poziomie **{rsi}**, potwierdzając zdrową kontrolę kupujących. Wciąż istnieje bezpieczna przestrzeń na kontynuację trendu wzrostowego, zanim wskaźniki ulegną niebezpiecznemu przegrzaniu."
+
+    # Rozbudowana Analiza Wolumenu
+    vol_raw = float(row_ta.get("Vol_Surge_Raw", 1.0))
+    if vol_raw >= 2.0:
+        vol_desc = f"odnotowano olbrzymią anomalię obrotu (**{vol_str}** standardowej średniej). Do gry wszedł potężny kapitał instytucjonalny, silnie uprawomocniając aktualny kierunek cenowy."
+    elif vol_raw >= 1.2:
+        vol_desc = f"wolumen jest powyżej normy (**{vol_str}** średniej), co wskazuje na przebudzenie kapitału detalicznego i gotowość rynku na większy ruch."
+    elif vol_raw <= 0.6:
+        vol_desc = f"obrót drastycznie zamarł (**{vol_str}** średniej). Aktualne wyceny mogą być zwodnicze ze względu na brak płynności. Nawet małe zlecenia potrafią zachwiać kursem."
+    else:
+        vol_desc = f"rynek handluje przy zachowaniu standardowego obrotu (**{vol_str}** średniej). Brakuje tu niespodziewanych zrywów płynnościowych."
+
+    # Wstęgi Bollingera (%B)
+    if pct_b < 0:
+        bb_desc = "Cena drastycznie wyłamała się poniżej dolnej Wstęgi Bollingera. Jest to rzadka anomalia statystyczna i historycznie wymusza silną reakcję powrotną do średniej, tworząc okazję zakupową."
+    elif pct_b > 1:
+        bb_desc = "Cena przebiła górną Wstęgę Bollingera (faza euforii). Istnieje ogromne, bezpośrednie ryzyko szybkiego cofnięcia kursu w poszukiwaniu wsparcia."
+    else:
+        bb_desc = f"Notowania przebywają bezpiecznie w kanale Wstęg Bollingera (wskaźnik %B = {pct_b})."
+
+    # Modele ML i Statystyka Zmienności
+    prog, mc, iv, prob, signal = "-", "-", "-", "-", "-"
+    prob_num = 50.0
+    iv_num = 50.0
+    
     if row_ml is not None:
-        prog = row_ml.get("Prognoza ML (24h)", "-")
-        mc = row_ml.get("Zasięg Monte Carlo (95%)", "-")
-        iv = row_ml.get("Implikowana Zmienność (IV)", "-")
-        signal = row_ml.get("Sygnał Hybrydowy", "-")
-        ml_txt = f"\n* **Modele & Monte Carlo:** Sygnał hybrydowy to **{signal}**. Prognoza ML (24h) wynosi **{prog}**, a statystyczny 95% zasięg Monte Carlo to **{mc}** (zmienność IV: {iv})."
+        prog = str(row_ml.get("Prognoza ML (24h)", "-"))
+        mc = str(row_ml.get("Zasięg Monte Carlo (95%)", "-"))
+        iv = str(row_ml.get("Implikowana Zmienność (IV)", "-"))
+        prob = str(row_ml.get("Prawdopodobieństwo", "-"))
+        signal = str(row_ml.get("Sygnał Hybrydowy", "-"))
+
+        try:
+            prob_num = float(prob.replace("%", ""))
+            iv_num = float(iv.replace("%", ""))
+        except Exception:
+            pass
+
+    if iv_num > 60.0:
+        zmiennosc_desc = "Jest ekstremalnie wysoka. Rynek może wykonać bardzo agresywne ruchy wymiatające zabezpieczenia w obu kierunkach."
+    elif iv_num > 35.0:
+        zmiennosc_desc = "Utrzymuje się na umiarkowanym poziomie. Idealne, standardowe środowisko dla rynku kryptowalut."
+    else:
+        zmiennosc_desc = "Pozostaje zadziwiająco niska. Możemy mieć do czynienia ze zjawiskiem kompresji zmienności (ciszy przed burzą)."
+
+    # Budowa scenariuszy przyszłości
+    if prob_num > 55:
+        scenariusz = f"Najbardziej prawdopodobnym wydarzeniem w perspektywie najbliższych sesji jest **zdecydowany atak kapitału w kierunku wyznaczonego oporu przy cenie ${resistance_str}**. Obliczenia modeli hybrydowych zdecydowanie faworyzują kupujących, a ewentualne mniejsze korekty powinny być szybko pochłaniane przez popyt."
+    elif prob_num < 45:
+        scenariusz = f"Najbardziej realistycznym wariantem jest **dalsze osuwanie się kursu i krytyczny test wsparcia przy poziomie ${support_str}**. Symulacje ostrzegają przed słabością, kapitulacją kapitału oraz możliwością pogłębienia się strat."
+    else:
+        scenariusz = f"Brak wyrazistego rozstrzygnięcia. Kurs najpewniej utknie w **bocznym przedziale nakreślonym przez statystykę Monte Carlo ({mc})**. Bez silnego impulsu makroekonomicznego rynek przeczeka ten czas w zawieszeniu."
+
+    # Ostateczna ewaluacja inwestycyjna
+    pewnosc = max(prob_num, 100 - prob_num)
+    if "KUP (Mocny)" in signal:
+        decyzja = "🟢 **ZDECYDOWANIE KUPUJ**"
+        uzasadnienie = "Wykryto rzadką i silną synergię pozytywnych wskaźników. Cena jest w korzystnym układzie, poparta mocnym prawdopodobieństwem w modelach uczenia maszynowego oraz sensownym stosunkiem Zysku do Ryzyka."
+    elif "KUP (Słaby)" in signal:
+        decyzja = "📈 **KUPUJ OSTROŻNIE (DCA)**"
+        uzasadnienie = "Istnieje matematyczna przewaga dla wzrostów, ale rynek nie ma wystarczającego impetu płynnościowego. Optymalne jest kupowanie waloru w mniejszych, rozbitych partiach (DCA) zamiast pełnym kapitałem od razu."
+    elif "SPRZEDAJ" in signal:
+        decyzja = "🔴 **NIE KUPUJ / SPRZEDAWAJ**"
+        uzasadnienie = "Model kategorycznie odradza zakupy na obecnych poziomach. Ryzyko obsuwy przewyższa drastycznie potencjał zysku ze względu na przegrzanie lub brak zainteresowania po stronie popytu."
+    else:
+        decyzja = "⏳ **WSTRZYMAJ SIĘ / CZEKAJ**"
+        uzasadnienie = "Szanse na sukces wynoszą około 50/50. Gra w tym momencie na rynku Spot to rzucanie monetą. Profesjonalny inwestor chroni kapitał dopóki nie otrzyma twardego przeważającego sygnału."
 
     return f"""
-📄 **Raport Analityczny AI: {symbol}**
+📑 **KOMPLEKSOWY RAPORT EKSPERCKI AI: {symbol}**
 
-* **Stan Techniczny:** Aktualna cena wynosi **${price}**. Wskaźnik RSI ({rsi}) wskazuje, że token {rsi_desc}. Wskaźnik wolumenu wynosi **{vol}**.
-* **Zarządzanie Ryzykiem:** Sugerowany poziom obrony (Stop Loss) znajduje się na cenie **${sl}**. Zapewnia to matematyczny bufor wyliczony na podstawie zmienności ATR.
-* **Potencjał i Cele:** Najbliższy kluczowy opór wyznaczoną na poziomie **${resistance}**. Stosunek zysku do ryzyka wynosi **{rr}**, a wyliczona szansa na powodzenie to **{szansa}** (Ogólna atrakcyjność: **{okazja}**).{ml_txt}
+Bieżąca wycena kryptowaluty {symbol} wynosi **${price_str}** (dobowa zmiana: **{change_24h}%**). W szerszym ujęciu strukturalnym, walor pozostaje w układzie **{trend_desc}**.
+
+**1. Kondycja Techniczna i Behawioralna (TA):**
+* **Struktura Momentum (RSI):** Oscylator utrzymuje się {rsi_desc}
+* **Dynamika Odchyleń (%B):** {bb_desc}
+* **Aktywność i Płynność:** Pod względem wolumenu {vol_desc}
+
+**2. Symulacja Przewidywań i Obliczenia Statystyczne:**
+Zaawansowane modele ML przetworzyły układ cenowy, zwracając następujące predykcje w oknie 24-godzinnym:
+* **Obliczone Prawdopodobieństwo Sukcesu (Wzrostu):** **{prob}**
+* **Statystyczny Zasięg Ruchu (95% ufności):** Zgodnie z rozkładem Monte Carlo oczekuje się wędrówki ceny w korytarzu **{mc}**.
+* **Implikowane Oczekiwane Ryzyko (IV):** {iv}. {zmiennosc_desc}
+
+---
+
+🔮 **NAJBARDZIEJ PRAWDOPODOBNA PRZYSZŁOŚĆ**
+{scenariusz}
+
+---
+
+💡 **PODSUMOWANIE I OSTATECZNA REKOMENDACJA**
+
+* **Werdykt Decyzyjny:** {decyzja}
+* **Statystyczna Pewność Sygnału:** **{pewnosc:.1f}%**
+* **Stosunek Zysku do Ryzyka (R:R):** {rr}
+* **Dlaczego taka decyzja?** {uzasadnienie}
+* **Kluczowy Warunek Bezpieczeństwa:** Jeśli decydujesz się na otworzenie transakcji długiej (Spot), system wymaga **bezwzględnego zlecenia Stop Loss na poziomie ${sl_str}**. To jedyny sposób na zabezpieczenie przed niespodziewanym załamaniem trendu.
 """
 
 # ==========================================
@@ -370,7 +469,6 @@ with col_dom:
 with col_fng:
     st.metric(label="Fear & Greed", value=f"{fng_val}/100", delta=fng_class)
 
-# Szybki filtr / podgląd mobilny
 if not df_ta.empty:
     st.markdown("---")
     selected_token = st.selectbox("📱 Szybki podgląd wybranego tokena (dla wygody na telefonie):", df_ta["Token"].tolist())
