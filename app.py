@@ -36,22 +36,25 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# LISTA TOKENÓW SPOT
+# LISTA TOKENÓW SPOT (ZGODNA Z WYMAGANIAMI)
 # ==========================================
 TOKENS = [
-    {'symbol': 'BTC', 'coinbase': 'BTC-USD', 'gecko_id': 'bitcoin'},
-    {'symbol': 'ETH', 'coinbase': 'ETH-USD', 'gecko_id': 'ethereum'},
     {'symbol': 'ONDO', 'coinbase': 'ONDO-USD', 'gecko_id': 'ondo-finance'},
-    {'symbol': 'RENDER', 'coinbase': 'RENDER-USD', 'gecko_id': 'render-token'},
     {'symbol': 'INJ', 'coinbase': 'INJ-USD', 'gecko_id': 'injective-protocol'},
     {'symbol': 'LINK', 'coinbase': 'LINK-USD', 'gecko_id': 'chainlink'},
+    {'symbol': 'RENDER', 'coinbase': 'RENDER-USD', 'gecko_id': 'render-token'},
     {'symbol': 'FET', 'coinbase': 'FET-USD', 'gecko_id': 'artificial-superintelligence-alliance'},
+    {'symbol': 'BTC', 'coinbase': 'BTC-USD', 'gecko_id': 'bitcoin'},
+    {'symbol': 'ETH', 'coinbase': 'ETH-USD', 'gecko_id': 'ethereum'},
     {'symbol': 'ENA', 'coinbase': 'ENA-USD', 'gecko_id': 'ethena'},
+    {'symbol': 'PENDLE', 'coinbase': None, 'gecko_id': 'pendle'},
     {'symbol': 'NEAR', 'coinbase': 'NEAR-USD', 'gecko_id': 'near'},
+    {'symbol': 'PLUME', 'coinbase': None, 'gecko_id': 'plume'},
+    {'symbol': 'JUP', 'coinbase': None, 'gecko_id': 'jupiter-exchange-solana'},
     {'symbol': 'UNI', 'coinbase': 'UNI-USD', 'gecko_id': 'uniswap'},
     {'symbol': 'SEI', 'coinbase': 'SEI-USD', 'gecko_id': 'sei-network'},
-    {'symbol': 'JUP', 'coinbase': None, 'gecko_id': 'jupiter-exchange-solana'},
-    {'symbol': 'KTA', 'coinbase': None, 'gecko_id': 'keeta'}
+    {'symbol': 'KTA', 'coinbase': None, 'gecko_id': 'keeta'},
+    {'symbol': 'SOL', 'coinbase': 'SOL-USD', 'gecko_id': 'solana'}
 ]
 
 def fmt(val):
@@ -221,7 +224,7 @@ def run_predictions(df_ta, fng_val):
     return df_ml[["Token", "Cena ($)", "RSI 1H", "RSI 4H", "RSI 12H", "MTF Zgoda", "Prognoza MC (24h)", "Zasięg Monte Carlo (95%)", "Prawdopodobieństwo", "Sygnał Hybrydowy"]]
 
 # ==========================================
-# AUTOMATYCZNA HISTORIA BEZ KOLUMNY KIERUNEK
+# HISTORIA
 # ==========================================
 HISTORY_FILE = "signals_history.csv"
 
@@ -234,7 +237,6 @@ def update_and_log_history(df_ml, df_ta):
     if os.path.exists(HISTORY_FILE):
         try: 
             df_hist = pd.read_csv(HISTORY_FILE)
-            # Jeśli plik ma starą kolumnę "Kierunek", automatycznie go usuwamy, aby zaktualizować schemat
             if "Kierunek" in df_hist.columns:
                 os.remove(HISTORY_FILE)
                 df_hist = pd.DataFrame()
