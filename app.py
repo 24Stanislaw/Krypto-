@@ -170,8 +170,13 @@ def fetch_technical_analysis():
             lower_bb = sma20 - (std20 * 2)
             pct_b = (price - lower_bb) / (upper_bb - lower_bb + 1e-9)
 
-            vol_ma = df['volume'].rolling(min(20, len(df))).mean().iloc[-1]
-            vol_surge = (df['volume'].iloc[-1] / vol_ma) if vol_ma > 0 else 1.0
+            # --- POPRAWKA WOLUMENU (ostatnia zamknięta świeca) ---
+            if len(df) > 2 and df['volume'].sum() > 0:
+                vol_ma = df['volume'].iloc[:-1].rolling(min(20, len(df)-1)).mean().iloc[-1]
+                last_vol = df['volume'].iloc[-2]
+                vol_surge = (last_vol / vol_ma) if vol_ma > 0 else 1.0
+            else:
+                vol_surge = 1.0
 
             sl = price - (2 * atr)
             support = df['low'].min()
@@ -244,7 +249,6 @@ def run_predictions(df_ta, fng_val):
     if not btc_row.empty:
         btc_vol_ratio = (float(btc_row["ATR"].values[0]) / float(btc_row["Price_Raw"].values[0]))
 
-    # Stałe ziarno zależne od godziny
     seed_val = int(pd.Timestamp.now().strftime("%Y%m%d%H"))
     rng = np.random.default_rng(seed=seed_val)
 
@@ -396,7 +400,7 @@ with tab2:
     st.dataframe(df_ml, use_container_width=True)
 
 # ==========================================
-# RAPORT ANATILTYCZNY AI
+# RAPORT ANALITYCZNY AI
 # ==========================================
 if not df_ta.empty:
     st.divider()
