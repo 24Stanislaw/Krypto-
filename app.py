@@ -231,7 +231,7 @@ def run_predictions(df_ta, fng_val):
     return df_ml[["Token", "Cena ($)", "RSI 1H", "RSI 4H", "RSI 12H", "MTF Zgoda", "Prognoza MC (24h)", "Zasięg Monte Carlo (95%)", "Prawdopodobieństwo", "Sygnał Hybrydowy"]]
 
 # ==========================================
-# UNIWERSALNA HISTORIA (BEZPIECZNE PARSOWANIE)
+# UNIWERSALNA HISTORIA (BEZPIECZNE TYPY)
 # ==========================================
 HISTORY_FILE = "signals_history.csv"
 
@@ -250,6 +250,10 @@ def update_and_log_history(df_ml, df_ta):
         if col not in df_hist.columns:
             df_hist[col] = "-" if "TP" in col else ("🔄 W toku (0/30d)" if col == "Status" else "")
 
+    # Jawna konwersja kolumn numerycznych zapobiegająca błędom typu w pandas
+    df_hist["Cena Wejścia"] = pd.to_numeric(df_hist["Cena Wejścia"], errors="coerce")
+    df_hist["Ekstremum Ceny"] = pd.to_numeric(df_hist["Ekstremum Ceny"], errors="coerce")
+
     price_map = dict(zip(df_ta["Token"], df_ta["Price_Raw"]))
     rsi_1h_map = dict(zip(df_ta["Token"], df_ta["RSI_1H_Raw"]))
 
@@ -258,26 +262,13 @@ def update_and_log_history(df_ml, df_ta):
             token = row["Token"]
             kierunek = row.get("Kierunek", "LONG")
             
-            try: 
-                entry = float(row["Cena Wejścia"])
-            except Exception: 
-                continue
+            entry = float(row["Cena Wejścia"]) if pd.notna(row["Cena Wejścia"]) else 0.0
             if entry <= 0: 
                 continue
             
             curr_price = float(price_map.get(token, entry))
             
-            # Bezpieczne pobieranie ekstremum ceny z zabezpieczeniem przed błędami typu string/NaN
-            try:
-                raw_extr = row["Ekstremum Ceny"]
-                if pd.notna(raw_extr) and str(raw_extr) != "-":
-                    prev_extr = float(raw_extr)
-                else:
-                    prev_extr = entry
-            except Exception:
-                prev_extr = entry
-            if prev_extr <= 0:
-                prev_extr = entry
+            prev_extr = float(row["Ekstremum Ceny"]) if pd.notna(row["Ekstremum Ceny"]) and float(row["Ekstremum Ceny"]) > 0 else entry
             
             if kierunek == "LONG":
                 new_extr = max(prev_extr, curr_price)
@@ -288,7 +279,7 @@ def update_and_log_history(df_ml, df_ta):
                 max_gain_pct = ((entry - new_extr) / entry) * 100
                 curr_gain_pct = ((entry - curr_price) / entry) * 100
 
-            df_hist.at[idx, "Ekstremum Ceny"] = new_extr
+            df_hist.at[idx, "Ekstremum Ceny"] = float(new_extr)
 
             if max_gain_pct >= 5.0 and str(row["TP 5%"]) == "-": df_hist.at[idx, "TP 5%"] = f"✅ {now_date}"
             if max_gain_pct >= 7.5 and str(row["TP 7.5%"]) == "-": df_hist.at[idx, "TP 7.5%"] = f"✅ {now_date}"
