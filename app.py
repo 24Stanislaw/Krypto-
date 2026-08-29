@@ -51,6 +51,10 @@ with st.sidebar:
         st.success("Wyczyszczono historię!")
         st.rerun()
 
+    st.markdown("---")
+    st.markdown("### 🧠 O systemie MTF PRO")
+    st.info("System łączy analizę wielu intermajęciowych ram czasowych (1H, 4H, 12H), wskaźnik siły względnej RSI, dynamiczne wsparcia oparte o EMA 200 oraz symulacje stochastyczne Monte Carlo w celu generowania wysokiej jakości sygnałów.")
+
 # ==========================================
 # LISTA TOKENÓW SPOT
 # ==========================================
@@ -191,6 +195,13 @@ def fetch_technical_analysis():
 
             ema200_4h = float(df_4h['close'].ewm(span=200, adjust=False).mean().iloc[-1])
             
+            # Bollinger Bands %B
+            bb_ma = df_4h['close'].rolling(20).mean().iloc[-1]
+            bb_std = df_4h['close'].rolling(20).std().iloc[-1]
+            bb_upper = bb_ma + (2 * bb_std)
+            bb_lower = bb_ma - (2 * bb_std)
+            bb_pct = (price - bb_lower) / (bb_upper - bb_lower + 1e-9)
+
             tr = pd.concat([df_4h['high'] - df_4h['low'], (df_4h['high'] - df_4h['close'].shift()).abs(), (df_4h['low'] - df_4h['close'].shift()).abs()], axis=1).max(axis=1)
             atr = float(tr.rolling(14).mean().iloc[-1])
             sl = price - (2 * atr)
@@ -217,7 +228,8 @@ def fetch_technical_analysis():
                 "SL (ATR)": fmt(sl), "Wsparcie": fmt(support), "Opór": fmt(resistance),
                 "Price_Raw": float(price), "EMA200_Raw": float(ema200_4h),
                 "RSI_1H_Raw": float(rsi_1h), "RSI_4H_Closed": float(rsi_4h_closed), 
-                "MTF_Score": mtf_score, "ATR_Raw": float(atr), "Vol_Spike": vol_spike
+                "MTF_Score": mtf_score, "ATR_Raw": float(atr), "Vol_Spike": vol_spike,
+                "BB_Pct": float(bb_pct)
             })
             loaded_count += 1
         except Exception:
@@ -228,7 +240,7 @@ def fetch_technical_analysis():
                 "MTF Zgoda": "0/4", "EMA 200 (4H)": fmt(p), "ATR": fmt(p * 0.02),
                 "SL (ATR)": fmt(p * 0.96), "Wsparcie": fmt(p * 0.95), "Opór": fmt(p * 1.05),
                 "Price_Raw": p, "EMA200_Raw": p, "RSI_1H_Raw": 50.0, "RSI_4H_Closed": 50.0,
-                "MTF_Score": 0, "ATR_Raw": p * 0.02, "Vol_Spike": False
+                "MTF_Score": 0, "ATR_Raw": p * 0.02, "Vol_Spike": False, "BB_Pct": 0.5
             })
             
     return pd.DataFrame(data), hist_dfs, fng_val, fng_class, btc_dom, loaded_count, len(TOKENS)
@@ -470,9 +482,9 @@ if st.button("🔄 Odśwież dane", type="primary"):
     st.cache_data.clear()
     st.rerun()
 
-df_ta_clean = df_ta.drop(columns=["Price_Raw", "EMA200_Raw", "RSI_1H_Raw", "RSI_4H_Closed", "MTF_Score", "ATR_Raw", "Vol_Spike"], errors="ignore")
+df_ta_clean = df_ta.drop(columns=["Price_Raw", "EMA200_Raw", "RSI_1H_Raw", "RSI_4H_Closed", "MTF_Score", "ATR_Raw", "Vol_Spike", "BB_Pct"], errors="ignore")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["1. Tabela Techniczna", "2. Sygnały", "3. ⚡ Aktywne Pozycje", "4. 🗂️ Archiwum", "5. 📈 Backtest"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["1. Tabela Techniczna", "2. Sygnały", "3. ⚡ Aktywne Pozycje", "4. 🗂️ Archiwum", "5. 📈 Backtest", "6. 📝 Analiza Pisemna i Wnioski"])
 
 with tab1: st.dataframe(df_ta_clean, use_container_width=True)
 with tab2: st.dataframe(df_ml, use_container_width=True)
@@ -505,3 +517,42 @@ with tab5:
         k3.metric("Win Rate", f"{wr}%")
         st.dataframe(bt_df, use_container_width=True)
     else: st.info("Brak rozliczonych sygnałów.")
+
+with tab6:
+    st.subheader("📝 Szczegółowy Raport i Wnioski Rynkowe w Czasie Rzeczywistym")
+    
+    selected_token = st.selectbox("Wybierz token do szczegółowej analizy pisemnej:", df_ta["Token"].tolist())
+    row_data = df_ta[df_ta["Token"] == selected_token].iloc[0]
+    
+    price = row_data["Price_Raw"]
+    ema = row_data["EMA200_Raw"]
+    rsi1h = row_data["RSI_1H_Raw"]
+    rsi4h = row_data["RSI_4H_Closed"]
+    mtf = row_data["MTF_Score"]
+    sup = row_data["Wsparcie"]
+    res = row_data["Opór"]
+    atr = row_data["ATR_Raw"]
+    bb_p = row_data["BB_Pct"]
+    
+    trend_desc = "wzrostowym (Cena powyżej długoterminowej EMA 200 na interwały 4H)" if price > ema else "spadkowym (Cena poniżej EMA 200, presja niedźwiedzi)"
+    momentum_desc = "wykupienia" if rsi1h > 65 else ("wyprzedania" if rsi1h < 35 else "neutralnym")
+    
+    st.markdown(f"### 📄 Raport Analityczny AI dla: **{selected_token}**")
+    
+    st.markdown(f"""
+    * **Struktura rynku i Trend:** Aktywo znajduje się w trendzie **{trend_desc}**. Wskazuje to na dominację sił {'byczych' if price > ema else 'niedźwiedzich'} w średnim horyzoncie czasowym.
+    * **Wskaźnik Momentum (RSI):** RSI dla interwału 1H wynosi **{round(rsi1h, 1)}**, co klasyfikuje bieżący stan jako **{momentum_desc}**. Na interwale 4H RSI zamknęło się na poziomie **{round(rsi4h, 1)}**.
+    * **Zgoda Wieloramowa (MTF Score):** Wynik zgodności ramy wielointerwałowej wynosi **{mtf}/4**, co określa siłę konfluencji sygnału technicznego.
+    * **Poziomy Krytyczne:** Najbliższe istotne wsparcie techniczne wyznaczono na poziomie **${fmt(sup)}**, natomiast kluczowy opór znajduje się na wysokości **${fmt(res)}**.
+    * **Zarządzanie Ryzykiem (ATR):** Średni zasięg zmienności (ATR 4H) wynosi **${fmt(atr)}**. Zalecany poziom obrony (Stop Loss) znajduje się w okolicach **${fmt(price - 2*atr)}**.
+    """)
+    
+    st.markdown("---")
+    st.markdown("### 💡 Kluczowe Wnioski i Strategia Inwestycyjna")
+    
+    if mtf >= 3 and rsi1h <= 45:
+        st.success(f"**Wniosek:** Token generuje silny sygnał pro-wzrostowy (Buy Setup). Konfluencja niskiego RSI oraz wsparcia strukturalnego stwarza korzystny stosunek zysku do ryzyka (Risk/Reward) przy wejściu długim (Long).")
+    elif rsi1h >= 68:
+        st.warning(f"**Wniosek:** Widoczne silne wyczerpanie ruchu wzrostowego i wykupienie krótkoterminowe. Wskazana ostrożność, rozważenie realizacji części zysków lub przygotowanie się pod korektę.")
+    else:
+        st.info(f"**Wniosek:** Rynek w stanie konsolidacji lub braku klarownego układu sił. Zalecane oczekiwanie na test kluczowych poziomów wsparcia/oporu przed zajęciem pozycji.")
