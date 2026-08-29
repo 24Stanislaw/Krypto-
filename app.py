@@ -3,6 +3,8 @@ import pandas as pd
 import requests
 import streamlit as st
 import os
+if os.path.exists("signals_history.csv"):
+    os.remove("signals_history.csv")
 
 # ==========================================
 # KONFIGURACJA STRONY I LOGOWANIE
