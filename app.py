@@ -315,6 +315,17 @@ def calc_obv(df):
   return "Brak wyraźnego trendu OBV"
 
 
+def calc_rvol(df, period=20):
+  if "volume" not in df.columns or df["volume"].sum() == 0 or len(df) < period:
+    return 1.0
+  vol_sma = df["volume"].rolling(window=period).mean()
+  current_vol = float(df["volume"].iloc[-1])
+  avg_vol = float(vol_sma.iloc[-1])
+  if avg_vol <= 0:
+    return 1.0
+  return round(current_vol / avg_vol, 2)
+
+
 @st.cache_data(ttl=300)
 def fetch_technical_analysis():
   data = []
@@ -359,6 +370,7 @@ def fetch_technical_analysis():
       )
       vwap_val = calc_vwap(df_4h) if len(df_4h) > 0 else price
       obv_status = calc_obv(df_4h)
+      rvol_val = calc_rvol(df_4h)
 
       tr = (
           pd.concat(
@@ -419,6 +431,7 @@ def fetch_technical_analysis():
           "RSI 1H": round(rsi_1h, 1),
           "RSI 4H": round(rsi_4h, 1),
           "RSI 1D": round(rsi_1d, 1),
+          "RVOL (4H)": f"{rvol_val}x",
           "VWAP (4H)": fmt(vwap_val),
           "OBV Status": obv_status,
           "MACD Hist (4H)": fmt(macd_hist),
@@ -434,6 +447,7 @@ def fetch_technical_analysis():
           "RSI_1H_Raw": float(rsi_1h),
           "RSI_4H_Raw": float(rsi_4h),
           "RSI_1D_Raw": float(rsi_1d),
+          "RVOL_Raw": float(rvol_val),
           "VWAP_Raw": float(vwap_val),
           "OBV_Raw": obv_status,
           "Regime_Raw": regime,
@@ -452,6 +466,7 @@ def fetch_technical_analysis():
           "RSI 1H": 50.0,
           "RSI 4H": 50.0,
           "RSI 1D": 50.0,
+          "RVOL (4H)": "1.0x",
           "VWAP (4H)": fmt(p),
           "OBV Status": "Neutralny",
           "MACD Hist (4H)": "0.0",
@@ -467,6 +482,7 @@ def fetch_technical_analysis():
           "RSI_1H_Raw": 50.0,
           "RSI_4H_Raw": 50.0,
           "RSI_1D_Raw": 50.0,
+          "RVOL_Raw": 1.0,
           "VWAP_Raw": p,
           "OBV_Raw": "Neutralny",
           "Regime_Raw": "Konsolidacja",
@@ -506,6 +522,7 @@ def run_predictions(df_ta, btc_dom):
     rsi_1h = float(row["RSI_1H_Raw"])
     rsi_1d = float(row["RSI_1D_Raw"])
     obv_status = str(row.get("OBV_Raw", ""))
+    rvol = float(row.get("RVOL_Raw", 1.0))
 
     num_simulations = 5000
     time_steps = 24
@@ -522,7 +539,7 @@ def run_predictions(df_ta, btc_dom):
     ci_upper = float(np.percentile(final_prices, 97.5))
     prob_up = float(np.mean(final_prices > price) * 100)
 
-    # Smart Score v2 (Wielowymiarowy Konsensus)
+    # Smart Score v2.1 z uwzględnieniem RVOL i OBV
     score = 50.0
     if regime == "Silny Trend Wzrostowy":
       score += 20.0
@@ -537,9 +554,14 @@ def run_predictions(df_ta, btc_dom):
       score -= 10.0
 
     if "Akumulacja" in obv_status:
-      score += 15.0
+      score += 12.0
     elif "Dystrybucja" in obv_status:
-      score -= 15.0
+      score -= 12.0
+
+    if rvol >= 1.5:
+      score += 8.0  # Premia za wysoki wolumen instytucjonalny
+    elif rvol < 0.7:
+      score -= 5.0  # Kara za niski wolumen (szum)
 
     score = max(5.0, min(95.0, score))
 
@@ -715,7 +737,7 @@ def get_backtest_stats(target_pct_str):
 
 
 # ==========================================
-# EKSPERCKI RAPORT AI (WERSJA PRO)
+# EKSPERCKI RAPORT AI (WERSJA PRO + RVOL)
 # ==========================================
 def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
   symbol = row_ta.get("Token", "UNKNOWN")
@@ -726,6 +748,7 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
   rsi_1h = round(float(row_ta.get("RSI_1H_Raw", 50)), 1)
   rsi_4h = round(float(row_ta.get("RSI_4H_Raw", 50)), 1)
   rsi_1d = round(float(row_ta.get("RSI_1D_Raw", 50)), 1)
+  rvol_str = row_ta.get("RVOL (4H)", "1.0x")
   vwap_str = row_ta.get("VWAP (4H)", "0.0")
   obv_status = row_ta.get("OBV Status", "Neutralny")
   macd_hist_str = row_ta.get("MACD Hist (4H)", "0.0")
@@ -745,11 +768,10 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
       row_ml.get("Prognoza MC (24h)", "-") if row_ml is not None else "-"
   )
 
-  # Luźne wnioski analityczne dopasowane do reżimu
   if "Silny Trend" in regime:
     conclusion = f"Struktura jest czysta. Kupujący kontrolują sytuację na 4H, a cena (${fmt(price_raw)}) utrzymuje się ponad EMA200 (${fmt(ema_raw)}). Sentyment rynkowy wyraźnie sprzyja stronie popytowej."
   elif "Korekta" in regime:
-    conclusion = f"Rynek realizuje zdrowe cofnięcie do strefy popytowej. Warto pilnować kluczowego wsparcia (${support_str}). Reakcija w tym obszarze otwiera korzystny R/R ({rr}), dając solidną bazę do wejścia."
+    conclusion = f"Rynek realizuje zdrowe cofnięcie do strefy popytowej. Warto pilnować kluczowego wsparcia (${support_str}). Reakcja w tym obszarze otwiera korzystny R/R ({rr}), dając solidną bazę do wejścia."
   elif "Spadkowy" in regime:
     conclusion = f"Brak struktur obronnych ze strony popytu. Cena znajduje się poniżej średniej EMA200 (${fmt(ema_raw)}), co oznacza dominację podaży. Zakupy w tym miejscu to na ten moment wysokie ryzyko."
   else:
@@ -775,20 +797,23 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
 * **Ocena sytuacji:** {conclusion}
 * {macro_warning}
 
-#### 2. 📈 Szczegółowy Rozbiór Wskaźników Technicznych (MTF + Wolumen)
-* **RSI 1H (`{rsi_1h}`) / RSI 4H (`{rsi_4h}`) / RSI 1D (`{rsi_1d}`):** Układ wielointerwałowy pokazuje pełny obraz siły aktywa od lokalnych zmian po dzienny trend makro.
-* **Wskaźnik VWAP (4H) (`{vwap_str}`):** Średnia cena ważona wolumenem wskazuje realną linię równowagi instytucjonalnej dla obecnego ruchu.
-* **OBV Status:** `{obv_status}` – określa, czy w tle występuje cicha akumulacja kapitału przez grubych graczy, czy jego odpływ.
-* **MACD Histogram (4H) (`{macd_hist_str}`) & EMA 200 (`{fmt(ema_raw)}`):** Główne filtry impetu i długoterminowej struktury rynku.
+#### 2. 📊 Wolumen i Płynność (Volume & Order Flow)
+* **Wolumen Względny (RVOL 4H):** `{rvol_str}` średniej z 20 okresów. Pozwala ocenić, czy obecny ruch poparty jest realnym kapitałem, czy jest pustym szumem.
+* **Wskaźnik VWAP (4H):** `{vwap_str}` (poziom instytucjonalnej równowagi).
+* **OBV Status:** `{obv_status}` (cicha akumulacja/dystrybucja instytucjonalna).
 
-#### 3. 🎲 Symulacja Monte Carlo i Prawdopodobieństwo
+#### 3. 📈 Wskaźniki Techniczne (MTF)
+* **RSI 1H (`{rsi_1h}`) / RSI 4H (`{rsi_4h}`) / RSI 1D (`{rsi_1d}`):** Spójność dynamiki cenowej na wielu interwałach.
+* **MACD Histogram (4H) (`{macd_hist_str}`) & EMA 200 (`{fmt(ema_raw)}`):** Główne filtry kierunku trendu.
+
+#### 4. 🎲 Symulacja Monte Carlo i Prawdopodobieństwo
 * **Oczekiwana mediana 24h:** `{prognoza_mc}`.
-* **Interpretacja:** Model stochastyczny uwzględnia aktualną zmienność (ATR/drift) – traktuj prognozę jako ramy statystyczne dla zachowania ceny.
+* **Interpretacja:** Ramy statystyczne oparte na stochastycznym błądzeniu cenowym uwzględniające zmienność ATR.
 
-#### 4. 🛡️ Inżynieria Pozycji i Zarządzanie Ryzykiem
-* **Strefa Inwalidacji (Stop Loss - 2x ATR):** `${sl_str}` – zamknięcie świecy 4H poniżej tego poziomu unieważnia tezę wzrostową.
+#### 5. 🛡️ Inżynieria Pozycji i Zarządzanie Ryzykiem
+* **Strefa Inwalidacji (Stop Loss - 2x ATR):** `${sl_str}`.
 * **Stosunek Zysku do Ryzyka (R:R):** `{rr}`.
-* **Granice Płynności:** Wsparcie bazowe: `${support_str}` | Opór strukturalny: `${resistance_str}`
+* **Granice Płynności:** Wsparcie: `${support_str}` | Opór: `${resistance_str}`
 * **Docelowe poziomy realizacji zysków (TP):**
   * **TP 1 (+5%):** `${fmt(tp_5)}`
   * **TP 2 (+7.5%):** `${fmt(tp_75)}`
@@ -800,7 +825,7 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
 # INTERFEJS GŁÓWNY (UI)
 # ==========================================
 with st.spinner(
-    "🔄 Pobieram dane MTF, liczę RSI 1D, VWAP i oceny przewagi..."
+    "🔄 Pobieram dane MTF, liczę RSI 1D, VWAP, RVOL i oceny przewagi..."
 ):
   (
       df_ta,
@@ -842,6 +867,7 @@ df_ta_clean = df_ta.drop(
         "RSI_1H_Raw",
         "RSI_4H_Raw",
         "RSI_1D_Raw",
+        "RVOL_Raw",
         "VWAP_Raw",
         "OBV_Raw",
         "Regime_Raw",
@@ -966,7 +992,7 @@ with tab5:
 
 if not df_ta.empty:
   st.divider()
-  st.subheader("🤖 Ekspercki Raport Analityczny Pro (Smart Score & MTF)")
+  st.subheader("🤖 Ekspercki Raport Analityczny Pro (Smart Score & RVOL)")
   sel_ai = st.selectbox(
       "Wybierz token do pełnego raportu:", df_ta["Token"].tolist(), key="ai_box"
   )
