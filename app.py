@@ -68,11 +68,11 @@ with st.sidebar:
   st.caption("Dostosuj restrykcyjność sygnałów zakupowych")
   
   min_smart_score = st.slider(
-      "Minimalny Smart Score (%)", min_value=0, max_value=100, value=65, step=5,
+      "Minimalny Smart Score (%)", min_value=0.0, max_value=100.0, value=65.0, step=1.0,
       help="Im wyższy wynik, tym silniejszy trend i lepsze parametry wolumenu."
   )
   max_rsi_4h = st.slider(
-      "Maksymalny RSI 4H", min_value=10, max_value=90, value=60, step=5,
+      "Maksymalny RSI 4H", min_value=10.0, max_value=90.0, value=60.0, step=1.0,
       help="Odfiltruj tokeny, które są już lokalnie przegrzane/wykupione."
   )
   wymagaj_akumulacji = st.checkbox(
@@ -364,7 +364,7 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
     if rsi_4h < 40: score += 10.0
     elif rsi_4h > 70: score -= 20.0
 
-    score = max(0.0, min(100.0, score)) # Limit [0, 100]
+    score = max(0.0, min(100.0, score)) # Limit [0, 100] z pełną precyzją zmiennoprzecinkową
 
     # WERDYKT ALGORYTMU
     is_altcoin = symbol not in ["BTC", "ETH"]
@@ -384,7 +384,7 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
 
     return pd.Series([
         f"${fmt(target_price)}", f"${fmt(ci_lower)} - ${fmt(ci_upper)}",
-        f"{round(prob_up, 1)}%", signal, round(score, 1)
+        f"{round(prob_up, 1)}%", signal, score
     ])
 
   df_ml = df_ta.copy()
@@ -445,7 +445,7 @@ def get_backtest_stats(target_pct_str):
   return pd.DataFrame(results), total, wins, round((wins / total) * 100, 1) if total > 0 else 0.0
 
 # ==========================================
-# OBSZERNY RAPORT AI (NOWA WERSJA)
+# OBSZERNY RAPORT AI
 # ==========================================
 def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
   symbol = row_ta.get("Token", "UNKNOWN")
@@ -459,11 +459,14 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
   macd_hist = float(row_ta.get("MACD Hist (4H)", 0.0))
   support_str, resistance_str, sl_str = row_ta.get("Wsparcie", "0.00"), row_ta.get("Opór", "0.00"), row_ta.get("SL (ATR)", "0.00")
   edge_status = row_ml.get("Ocena Przewagi (Edge)", "-") if row_ml is not None else "-"
-  smart_score = row_ml.get("Smart Score (%)", "50.0") if row_ml is not None else "50.0"
+  
+  # Precyzyjne formatowanie Smart Score bez zaokrągleń
+  raw_smart_score = row_ml.get("Smart Score (%)", 50.0) if row_ml is not None else 50.0
+  smart_score = f"{float(raw_smart_score):.2f}"
+  
   prognoza_mc = row_ml.get("Prognoza MC (24h)", "-") if row_ml is not None else "-"
   prob_up = row_ml.get("Prawdopodobieństwo", "-") if row_ml is not None else "-"
 
-  # Analiza Strukturalna
   if "Silny Trend" in regime: 
       struct_desc = f"Struktura rynkowa dla {symbol} jest wysoce optymistyczna. Cena (${fmt(price_raw)}) stabilnie utrzymuje się ponad długoterminową średnią kroczącą EMA200 (${fmt(ema_raw)}). Potwierdza to pełną dominację obozu kupujących (byków). Trend wykazuje zdrową dynamikę i stanowi solidną bazę do kontynuacji wzrostów."
   elif "Korekta" in regime: 
@@ -473,27 +476,24 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
   else: 
       struct_desc = "Walor porusza się w fazie konsolidacji bocznej. Brak zdecydowanego kierunku generuje podwyższony szum na wskaźnikach technicznych i wymaga zachowania gotówki do momentu wybicia."
 
-  # Analiza Makro
   is_altcoin = symbol not in ["BTC", "ETH"]
   if is_altcoin and btc_dom > 59.0:
       macro_desc = f"⚠️ **Ryzyko Makroekonomiczne:** Dominacja Bitcoina wynosi obecnie aż `{btc_dom}%`. W takich warunkach kapitał spekulacyjny niemal w całości koncentruje się na głównym aktywie, brutalnie odcinając altcoiny (takie jak {symbol}) od niezbędnej płynności. Nawet dobre układy techniczne mogą zostać zanegowane przez brak świeżego kapitału."
   else:
       macro_desc = f"✅ **Otoczenie Makroekonomiczne:** Dominacja Bitcoina na poziomie `{btc_dom}%` nie stanowi obecnie blokady. Kapitał swobodnie rotuje po szerokim rynku, co sprzyja potencjalnym wzrostom altcoinów."
 
-  # Analiza Płynności i OBV
   rvol_float = float(rvol_str.replace("x", "")) if "x" in rvol_str else 1.0
   if rvol_float >= 1.5: rvol_desc = "Wybitnie wysoki wolumen. Ruch jest napędzany realnym, instytucjonalnym kapitałem."
   elif rvol_float >= 1.0: rvol_desc = "Wolumen w normie. Stabilne zainteresowanie rynkowe."
   else: rvol_desc = "Zauważalny brak płynności i zaangażowania dużych graczy (pusty rynek, wysokie ryzyko fałszywych wybić)."
 
-  # Wnioski końcowe
   if "WYSOKI EDGE" in edge_status: final_reco = f"**Rekomendacja:** Zdecydowane **Zezwolenie na handel (🟢)**. Parametry techniczne, wsparcie wolumenowe oraz korelacja interwałów wskazują na wysoką przewagę statystyczną. Rozważ otwarcie pozycji Long z bezwzględnym poszanowaniem poziomu Stop Loss."
   elif "NEUTRALNY" in edge_status: final_reco = f"**Rekomendacja:** Status **Obserwacja (🟡)**. Aktywo ma potencjał, ale algorytm wychwycił pewne anomalie (np. zbyt wysokie RSI, brak potwierdzenia wolumenowego lub lokalną dystrybucję). Należy zaczekać na lepsze potwierdzenie struktury."
   else: final_reco = "**Rekomendacja:** Sygnał **Odrzucony (❌)**. Układ sił na rynku faworyzuje podaż lub środowisko makro jest zbyt toksyczne. Zdecydowanie zaleca się pozostanie w gotówce i ochronę kapitału."
 
   return f"""
 ### 🎯 EKSPERCKA SYNTEZA MTF PRO: {symbol}
-**Werdykt Algorytmu:** `{edge_status}` | **Smart Score:** **{smart_score}%** **Cena Aktualna:** `${fmt(price_raw)}` | **Reżim Rynkowy:** **{regime}**
+**Werdykt Algorytmu:** `{edge_status}` | **Smart Score:** **{smart_score}%** | **Cena Aktualna:** `${fmt(price_raw)}` | **Reżim Rynkowy:** **{regime}**
 
 ---
 #### 1. 🧠 Analiza Strukturalna i Makroekonomiczna
@@ -502,26 +502,23 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
 
 #### 2. 📊 Płynność, Wolumen i Ślady Smart Money
 * **Względny Wolumen (RVOL 4H):** `{rvol_str}` średniej z 20 okresów. *Zaraportowano:* {rvol_desc}
-* **Stan OBV (On-Balance Volume):** `{obv_status}`. Wskaźnik ten demaskuje to, co dzieje się pod powierzchnią ceny. Pokazuje, czy duzi gracze cicho akumulują aktywo w dołkach, czy też powoli je wyprzedają (dystrybucja) pod przykrywką lokalnych wzrostów.
-* **Poziom VWAP (4H):** `${fmt(vwap_val)}`. Średnia cena ważona wolumenem. Gdy aktualna cena znajduje się powyżej tego poziomu, kupujący mają pełną kontrolę śróddzienną.
+* **Stan OBV (On-Balance Volume):** `{obv_status}`. Wskaźnik ten demaskuje to, co dzieje się pod powierzchnią ceny.
+* **Poziom VWAP (4H):** `${fmt(vwap_val)}`. Średnia cena ważona wolumenem.
 
 #### 3. 📈 Wskaźniki Pędu (Multi-Timeframe)
-* **Korelacja RSI (Relative Strength Index):** 
-  * Interwał 1H (`{round(rsi_1h, 1)}`): Pokazuje lokalny szum i punkty zwrotne dla daytradingu.
-  * Interwał 4H (`{round(rsi_4h, 1)}`): Odpowiada za główny pęd operacyjny dla algorytmu.
-  * Interwał 1D (`{round(rsi_1d, 1)}`): Definiuje nadrzędny trend makro. Spójność tych trzech ram czasowych drastycznie zwiększa prawdopodobieństwo sukcesu transakcji.
-* **MACD (4H):** Histogram na poziomie `{fmt(macd_hist)}`. Pokazuje, czy obecny trend przyspiesza, czy wytraca swoje momentum operacyjne.
+* **Korelacja RSI (Relative Strength Index):** * Interwał 1H (`{round(rsi_1h, 1)}`): Lokalny szum / daytrading.
+  * Interwał 4H (`{round(rsi_4h, 1)}`): Główny pęd operacyjny algorytmu.
+  * Interwał 1D (`{round(rsi_1d, 1)}`): Nadrzędny trend makro.
+* **MACD (4H):** Histogram na poziomie `{fmt(macd_hist)}`.
 
 #### 4. 🎲 Analiza Stochastyczna (Monte Carlo 24h)
 * **Prognoza Mediany Cenowej:** `{prognoza_mc}` (Szansa na zamknięcie wyżej: `{prob_up}`).
-* **Interpretacja Modelu:** Zamiast zgadywać jeden cel, algorytm przeprowadził 5000 symulacji błądzenia losowego ceny w oparciu o historyczną zmienność i "dryf" aktywa. Wynik ten pokazuje najbardziej prawdopodobny środek ciężkości dla ceny na jutrzejszą sesję.
 
 #### 5. 🛡️ Inżynieria Ryzyka i Poziomy Operacyjne
-* **Poziom Inwalidacji (Stop Loss):** `{sl_str}` (Obliczony dynamicznie na bazie wskaźnika ATR, co chroni przed wycięciem na losowych szpilkach cenowych).
-* **Zarządzanie Zyskiem (Stosunek Ryzyka R:R - `{row_ta.get('R:R')}`):**
-  * **Strefa Wsparcia:** `{support_str}`
-  * **Strefa Oporu:** `{resistance_str}`
-  * **Cele (Take Profit):** TP1 (+5%): `${fmt(price_raw * 1.05)}` | TP2 (+7.5%): `${fmt(price_raw * 1.075)}` | TP3 (+10%): `${fmt(price_raw * 1.10)}`
+* **Poziom Inwalidacji (Stop Loss):** `{sl_str}`
+* **Zarządzanie Zyskiem (R:R - `{row_ta.get('R:R')}`):**
+  * **Wsparcie:** `{support_str}` | **Opór:** `{resistance_str}`
+  * **TP1 (+5%):** `${fmt(price_raw * 1.05)}` | **TP2 (+7.5%):** `${fmt(price_raw * 1.075)}` | **TP3 (+10%):** `${fmt(price_raw * 1.10)}`
 
 ---
 #### 🏁 6. Podsumowanie i Werdykt Końcowy
@@ -533,7 +530,6 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
 # ==========================================
 with st.spinner("🔄 Pobieram dane na żywo z API (Coinbase/CoinGecko) i liczę logikę pro..."):
   df_ta, fng_val, fng_class, btc_dom, alt_season, loaded_c, total_c = fetch_technical_analysis()
-  # Filtry z panelu bocznego trafiają tutaj do modelu decyzyjnego
   df_ml = run_predictions(df_ta, btc_dom, min_smart_score, max_rsi_4h, wymagaj_akumulacji)
   update_history_status(df_ta)
 
@@ -546,7 +542,7 @@ col_f.metric("Fear & Greed", f"{fng_val}/100", fng_class)
 
 st.markdown("---")
 
-# SEKCJA OKAZJI (Zintegrowana z algorytmem)
+# SEKCJA OKAZJI
 st.markdown("### 🔥 Najlepsze Okazje Zakupowe")
 if not df_ml.empty:
   okazje_df = df_ml[df_ml["Ocena Przewagi (Edge)"].str.contains("WYSOKI EDGE", na=False)]
@@ -554,9 +550,10 @@ if not df_ml.empty:
     cols_okazje = st.columns(min(len(okazje_df), 4))
     for i, (_, row) in enumerate(okazje_df.iterrows()):
       with cols_okazje[i % len(cols_okazje)]:
-        st.success(f"**{row['Token']}**\n\nCena: `{row['Cena ($)']}`\nSmart Score: **{row['Smart Score (%)']}%**")
+        score_val = float(row['Smart Score (%)'])
+        st.success(f"**{row['Token']}**\n\nCena: `{row['Cena ($)']}`\nSmart Score: **{score_val:.2f}%**")
   else:
-    st.info("Obecnie żaden token nie spełnia restrykcyjnych warunków algorytmu (Zbyt słaby wynik, wysoki RSI, lub dystrybucja kapitału).")
+    st.info("Obecnie żaden token nie spełnia restrykcyjnych warunków algorytmu.")
 
 st.markdown("---")
 
@@ -567,11 +564,22 @@ if st.button("🔄 Odśwież dane", type="primary"):
 df_ta_clean = df_ta.drop(columns=["Price_Raw", "EMA200_Raw", "Support_Raw", "Resistance_Raw", "RSI_1H_Raw", "RSI_4H_Raw", "RSI_1D_Raw", "RVOL_Raw", "VWAP_Raw", "OBV_Raw", "Regime_Raw", "Vol_Raw", "Drift_Raw", "Is_Bouncing"], errors="ignore")
 if "Atrakcyjność (%)" not in df_ta_clean.columns and not df_ml.empty: df_ta_clean["Atrakcyjność (%)"] = df_ml["Smart Score (%)"]
 
+# Konfiguracja wyświetlania tabel, wyłączająca zaokrąglenia i formatująca dokładne wartości zmiennoprzecinkowe
+config_tabel = {
+    "Atrakcyjność (%)": st.column_config.NumberColumn("Atrakcyjność (%)", format="%.2f"),
+    "Smart Score (%)": st.column_config.NumberColumn("Smart Score (%)", format="%.2f"),
+    "24h (%)": st.column_config.NumberColumn("24h (%)", format="%.2f"),
+    "RSI 1H": st.column_config.NumberColumn("RSI 1H", format="%.1f"),
+    "RSI 4H": st.column_config.NumberColumn("RSI 4H", format="%.1f"),
+    "RSI 1D": st.column_config.NumberColumn("RSI 1D", format="%.1f"),
+}
+
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["1. Reżimy", "2. Ocena Przewagi (Smart Score)", "3. ⚡ Aktywne Pozycje", "4. 🗂️ Archiwum", "5. 📈 Backtest"])
 
-with tab1: st.dataframe(df_ta_clean, use_container_width=True)
+with tab1: 
+  st.dataframe(df_ta_clean, column_config=config_tabel, use_container_width=True)
 with tab2:
-  st.dataframe(df_ml.drop(columns=["Prawdopodobieństwo"], errors="ignore"), use_container_width=True)
+  st.dataframe(df_ml.drop(columns=["Prawdopodobieństwo"], errors="ignore"), column_config=config_tabel, use_container_width=True)
   st.markdown("---")
   st.subheader("➕ Otwórz i śledź wybraną pozycję ręcznie")
   col_sel_tok, col_sel_btn = st.columns([2, 1])
