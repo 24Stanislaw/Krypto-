@@ -5,9 +5,21 @@ import requests
 import streamlit as st
 
 # ==========================================
-# KONFIGURACJA STRONY I LOGOWANIE
+# KONFIGURACJA STRONY I BIAŁE TŁO
 # ==========================================
 st.set_page_config(page_title="Analiza Krypto MTF Pro", layout="wide")
+
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background-color: #ffffff;
+        color: #111111;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 HASLO = st.secrets.get("PASSWORD", "Krypto2026!")
 
@@ -323,7 +335,7 @@ def fetch_technical_analysis():
   return pd.DataFrame(data), fng_val, fng_class, btc_dom, alt_season, loaded_count, len(TOKENS)
 
 # ==========================================
-# SCORING I PREDYKCJE
+# SCORING I PREDYKCJE (ZMIENIONY NA SKALĘ CIĄGŁĄ)
 # ==========================================
 def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumulation):
   if df_ta.empty: return pd.DataFrame()
@@ -349,18 +361,20 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
 
     score = 50.0 
     
-    if "Silny Trend Wzrostowy" in regime: score += 30.0
-    elif "Korekta" in regime: score += 15.0
-    elif "Spadkowy" in regime: score -= 25.0
+    # Płynny wpływ reżimu rynkowego
+    if "Silny Trend Wzrostowy" in regime: score += 25.0
+    elif "Korekta" in regime: score += 10.0
+    elif "Spadkowy" in regime: score -= 20.0
 
-    if rvol >= 1.2: score += 10.0
-    elif rvol < 0.6: score -= 10.0
+    # Płynna wycena wolumenu (RVOL) - skala proporcjonalna wokół średniej 1.0x
+    score += (rvol - 1.0) * 20.0  
 
-    if "Akumulacja" in obv_status: score += 10.0
+    if "Akumulacja" in obv_status: score += 12.0
     elif "Dystrybucja" in obv_status: score -= 15.0
 
-    if rsi_4h < 40: score += 10.0
-    elif rsi_4h > 70: score -= 20.0
+    # Płynna korekta za RSI 4H
+    if rsi_4h < 45: score += (45 - rsi_4h) * 0.4
+    elif rsi_4h > 65: score -= (rsi_4h - 65) * 0.6
 
     score = max(0.0, min(100.0, score))
 
@@ -462,7 +476,6 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
   prognoza_mc = row_ml.get("Prognoza MC (24h)", "-") if row_ml is not None else "-"
   prob_up = row_ml.get("Prawdopodobieństwo", "-") if row_ml is not None else "-"
 
-  # 1. Price Action
   if "Silny Trend" in regime: 
       pa_wniosek = "Pełna dominacja popytu. Ruch charakteryzuje się wysoka dynamiką, a pozycje pro-trendowe mają najwyższą przewagę statystyczną."
       pa_stan = f"Cena na poziomie `${fmt(price_raw)}` notowana jest wysoce powyżej długoterminowej średniej EMA200 (`${fmt(ema_raw)}`)."
@@ -476,7 +489,6 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
       pa_wniosek = "Brak jednoznacznego trendu wyższego rzędu. Należy ograniczyć aktywność do czasu wybicia z konsolidacji."
       pa_stan = f"Cena (`${fmt(price_raw)}`) porusza się w horyzontalnym paśmie w pobliżu EMA200 (`${fmt(ema_raw)}`)."
 
-  # 2. Makro
   is_altcoin = symbol not in ["BTC", "ETH"]
   if is_altcoin and btc_dom > 59.0:
       macro_stan = f"Dominacja Bitcoina wysoka (`{btc_dom}%`)."
@@ -485,7 +497,6 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
       macro_stan = f"Dominacja Bitcoina na umiarkowanym poziomie (`{btc_dom}%`)."
       macro_wniosek = "Kapitał swobodnie rotuje do walorów o niższej kapitalizacji. Otoczenie wspiera kontynuację ruchów popytowych."
 
-  # 3. RVOL
   rvol_float = float(rvol_str.replace("x", "")) if "x" in rvol_str else 1.0
   if rvol_float >= 1.5:
       rvol_stan = f"Współczynnik wynosi `{rvol_str}` średniej z 20 okresów."
@@ -497,7 +508,6 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
       rvol_stan = f"Niski wolumen (`{rvol_str}`)."
       rvol_wniosek = "Rynek 'pusty' płynnościowo. Występuje wysokie ryzyko generowania fałszywych wybić (fakeoutów)."
 
-  # 4. OBV
   if "Akumulacja" in obv_status:
       obv_wniosek = "Smart Money cicho skupują token z rynku na niższych poziomach cenowych."
   elif "Dystrybucja" in obv_status:
@@ -505,7 +515,6 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
   else:
       obv_wniosek = "Równowaga między podażą a popytem w wolumenie skumulowanym."
 
-  # 5. Rekomendacja końcowa
   if "WYSOKI EDGE" in edge_status:
       final_reco = "**Rekomendacja:** Zdecydowane **Zezwolenie na handel (🟢)**. Pełne zebranie sprzyjających czynników trendowych, wolumenowych i interwałowych."
   elif "NEUTRALNY" in edge_status:
@@ -618,10 +627,10 @@ config_tabel = {
     "RSI 1D": st.column_config.NumberColumn("RSI 1D", format="%.1f"),
 }
 
-# Funkcja stylizująca Pandas Styler pod kątem kolorowania co drugiego wiersza (Zebra Striping)
+# Funkcja stylizująca Pandas Styler pod kątem jasnego tła i czytelnej czcionki
 def apply_zebra_striping(df):
   return df.style.apply(
-      lambda row: ['background-color: #1a1e24; color: #ffffff;' if row.name % 2 == 1 else 'background-color: #0e1117; color: #ffffff;' for _ in row],
+      lambda row: ['background-color: #f7f9fa; color: #111111;' if row.name % 2 == 1 else 'background-color: #ffffff; color: #111111;' for _ in row],
       axis=1
   )
 
