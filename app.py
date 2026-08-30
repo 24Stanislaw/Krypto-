@@ -342,7 +342,7 @@ def fetch_technical_analysis():
     return pd.DataFrame(data), fng_val, fng_class, btc_dom, alt_season, loaded_count, len(TOKENS)
 
 # ==========================================
-# SCORING I PREDYKCJE (MONTE CARLO 7 DNI)
+# SCORING I PREDYKCJE (MONTE CARLO 10 DNI)
 # ==========================================
 def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumulation):
     if df_ta.empty: return pd.DataFrame(), {}
@@ -360,9 +360,9 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         obv_status = str(row.get("OBV_Raw", ""))
         rvol = float(row.get("RVOL_Raw", 1.0))
 
-        # Symulacja 7 dni (168 godzin)
+        # Symulacja 10 dni (240 godzin)
         adjusted_drift = drift_1h - (0.5 * (vol_1h**2))
-        shocks = rng.normal(loc=adjusted_drift, scale=vol_1h, size=(5000, 168))
+        shocks = rng.normal(loc=adjusted_drift, scale=vol_1h, size=(5000, 240))
         cum_returns = np.exp(np.cumsum(shocks, axis=1))
         final_prices_paths = price * cum_returns
         
@@ -370,11 +370,11 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         
         p_24h = float(np.median(final_prices_paths[:, 23]))
         p_3d = float(np.median(final_prices_paths[:, 71]))
-        p_7d = float(np.median(final_prices_paths[:, 167]))
+        p_10d = float(np.median(final_prices_paths[:, 239]))
 
-        ci_lower_7d = float(np.percentile(final_prices_paths[:, 167], 2.5))
-        ci_upper_7d = float(np.percentile(final_prices_paths[:, 167], 97.5))
-        prob_up_7d = float(np.mean(final_prices_paths[:, 167] > price) * 100)
+        ci_lower_10d = float(np.percentile(final_prices_paths[:, 239], 2.5))
+        ci_upper_10d = float(np.percentile(final_prices_paths[:, 239], 97.5))
+        prob_up_10d = float(np.mean(final_prices_paths[:, 239] > price) * 100)
 
         score = 50.0 
         if "Silny Trend Wzrostowy" in regime: score += 25.0
@@ -401,14 +401,14 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         else: signal = "❌ ODRZUCONY (Słaba struktura/podaż)"
 
         return pd.Series([
-            f"${fmt(p_24h)}", f"${fmt(p_3d)}", f"${fmt(p_7d)}",
-            f"${fmt(ci_lower_7d)} - ${fmt(ci_upper_7d)}",
-            f"{round(prob_up_7d, 1)}%", signal, score,
-            p_7d # Raw Prognoza 7D do logiki handlowej
+            f"${fmt(p_24h)}", f"${fmt(p_3d)}", f"${fmt(p_10d)}",
+            f"${fmt(ci_lower_10d)} - ${fmt(ci_upper_10d)}",
+            f"{round(prob_up_10d, 1)}%", signal, score,
+            p_10d
         ])
 
     df_ml = df_ta.copy()
-    df_ml[["Prognoza 24h", "Prognoza 3D", "Prognoza 7D", "Zasięg MC 7D (95%)", "Szansa Wzrostu (7D)", "Ocena Przewagi (Edge)", "Smart Score (%)", "Prognoza_7D_Raw"]] = df_ml.apply(analyze_row, axis=1)
+    df_ml[["Prognoza 24h", "Prognoza 3D", "Prognoza 10D", "Zasięg MC 10D (95%)", "Szansa Wzrostu (10D)", "Ocena Przewagi (Edge)", "Smart Score (%)", "Prognoza_10D_Raw"]] = df_ml.apply(analyze_row, axis=1)
     df_ml["Atrakcyjność (%)"] = df_ml["Smart Score (%)"]
     return df_ml, monte_carlo_paths
 
@@ -419,7 +419,7 @@ def plot_price_forecast(symbol, current_price, price_paths):
     median_path = np.median(price_paths, axis=0)
     upper_95 = np.percentile(price_paths, 97.5, axis=0)
     lower_95 = np.percentile(price_paths, 2.5, axis=0)
-    hours = np.arange(1, 169)
+    hours = np.arange(1, 241)
     
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -434,8 +434,9 @@ def plot_price_forecast(symbol, current_price, price_paths):
         line=dict(color='#2563eb', width=3), name='Prognoza (Mediana MC)'
     ))
     fig.add_hline(y=current_price, line_dash="dash", line_color="gray", annotation_text="Obecna cena")
+    fig.add_hline(y=current_price * 1.06, line_dash="dot", line_color="green", annotation_text="Cel TP (+6%)")
     fig.update_layout(
-        title=f"📈 Prognoza Trajektorii Ceny 7D (Monte Carlo): {symbol}",
+        title=f"📈 Prognoza Trajektorii Ceny 10D (Monte Carlo): {symbol}",
         xaxis_title="Godziny od teraz", yaxis_title="Cena ($)",
         template="plotly_white", height=400, margin=dict(l=20, r=20, t=50, b=20)
     )
@@ -446,7 +447,7 @@ def plot_price_forecast(symbol, current_price, price_paths):
 # ==========================================
 def auto_zapisz_sygnaly(df_ml, df_ta):
     if df_ml.empty: return
-    kolumny = ["Data Wejścia", "Token", "Typ Sygnału", "Cena Wejścia ($)", "Cel 7D ($)", "SL ($)", "Ekstremum ($)", "Data Wyjścia", "Status", "Zysk (%)"]
+    kolumny = ["Data Wejścia", "Token", "Typ Sygnału", "Cena Wejścia ($)", "Cel TP (6%) ($)", "SL ($)", "Ekstremum ($)", "Data Wyjścia", "Status", "Zysk (%)"]
     
     if os.path.exists(HISTORY_FILE):
         df_hist = pd.read_csv(HISTORY_FILE)
@@ -463,7 +464,9 @@ def auto_zapisz_sygnaly(df_ml, df_ta):
         if token not in aktywne_tokeny:
             cena_we = float(df_ta[df_ta["Token"] == token].iloc[0]["Price_Raw"])
             atr = float(df_ta[df_ta["Token"] == token].iloc[0]["ATR_Raw"])
-            cel_7d = float(row["Prognoza_7D_Raw"])
+            
+            # Cel ustawiony sztywno na +6% zysku od ceny wejścia
+            cel_tp = cena_we * 1.06
             sl = cena_we - (2 * atr)
 
             nowe_wiersze.append({
@@ -471,7 +474,7 @@ def auto_zapisz_sygnaly(df_ml, df_ta):
                 "Token": token,
                 "Typ Sygnału": "Auto (Wysoki Edge)",
                 "Cena Wejścia ($)": round(cena_we, 5),
-                "Cel 7D ($)": round(cel_7d, 5),
+                "Cel TP (6%) ($)": round(cel_tp, 5),
                 "SL ($)": round(sl, 5),
                 "Ekstremum ($)": round(cena_we, 5),
                 "Data Wyjścia": "-",
@@ -501,7 +504,9 @@ def aktualizuj_i_rozlicz_pozycje(df_ta):
 
         curr_price = float(price_map[token])
         entry = float(row["Cena Wejścia ($)"])
-        cel_7d = float(row["Cel 7D ($)"])
+        
+        # Pobranie celu TP (6%) z nagłówka lub wyliczenie z ceny wejścia
+        cel_tp = float(row.get("Cel TP (6%) ($)", row.get("Cel 7D ($)", entry * 1.06)))
         sl = float(row["SL ($)"])
 
         prev_extr = float(row["Ekstremum ($)"]) if pd.notna(row["Ekstremum ($)"]) else entry
@@ -517,20 +522,21 @@ def aktualizuj_i_rozlicz_pozycje(df_ta):
         status = row["Status"]
         data_wy = row["Data Wyjścia"]
 
-        if curr_price >= cel_7d:
-            status = "✅ SUKCES (TP 7D)"
+        # Warunki wyjścia: Cel 6% LUB upływ 10 dni
+        if curr_price >= cel_tp:
+            status = "✅ SUKCES (TP +6%)"
             data_wy = now_str
         elif curr_price <= sl:
             status = "❌ PORAŻKA (SL)"
             data_wy = now_str
-        elif dni_minely >= 7:
+        elif dni_minely >= 10:
             if curr_price > entry:
-                status = "⚠️ ZAMKNIĘTO (Czas / Mały Zysk)"
+                status = "⚠️ ZAMKNIĘTO (Upływ 10d / Zysk)"
             else:
-                status = "⚠️ ZAMKNIĘTO (Czas / Strata)"
+                status = "⚠️ ZAMKNIĘTO (Upływ 10d / Strata)"
             data_wy = now_str
         else:
-            status = f"🔄 W toku ({dni_minely}/7d)"
+            status = f"🔄 W toku ({dni_minely}/10d)"
 
         df_hist.at[idx, "Status"] = status
         df_hist.at[idx, "Data Wyjścia"] = data_wy
@@ -538,7 +544,7 @@ def aktualizuj_i_rozlicz_pozycje(df_ta):
     df_hist.to_csv(HISTORY_FILE, index=False)
 
 # ==========================================
-# OBSZERNY RAPORT AI (NOWA ROZBUDOWANA WERSJA)
+# OBSZERNY RAPORT AI
 # ==========================================
 def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     symbol = row_ta.get("Token", "UNKNOWN")
@@ -562,11 +568,11 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     
     edge_status = row_ml.get("Ocena Przewagi (Edge)", "-") if row_ml is not None else "-"
     smart_score = f"{float(row_ml.get('Smart Score (%)', 50.0)):.2f}" if row_ml is not None else "50.00"
-    prognoza_7d = row_ml.get("Prognoza 7D", "-") if row_ml is not None else "-"
-    zasieg_mc_7d = row_ml.get("Zasięg MC 7D (95%)", "-") if row_ml is not None else "-"
-    prob_up_7d = row_ml.get("Szansa Wzrostu (7D)", "-") if row_ml is not None else "-"
+    prognoza_10d = row_ml.get("Prognoza 10D", "-") if row_ml is not None else "-"
+    zasieg_mc_10d = row_ml.get("Zasięg MC 10D (95%)", "-") if row_ml is not None else "-"
+    prob_up_10d = row_ml.get("Szansa Wzrostu (10D)", "-") if row_ml is not None else "-"
     
-    target_tp1 = price_raw + (1.5 * atr_raw)
+    target_tp1 = price_raw * 1.06 # Wymuszone +6%
 
     # --- 1. DYNAMICZNA INTERPRETACJA STRUKTURY ---
     if "Silny Trend" in regime: 
@@ -628,14 +634,14 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
 
 #### 4. 🎲 Symulacja Monte Carlo
 *Modelowanie tysięcy potencjalnych ścieżek cenowych z wykorzystaniem historycznej zmienności.*
-* **Mediana prognozy (Cel za 7 dni):** `{prognoza_7d}` (Prawdopodobieństwo wzrostu wyceniono na `{prob_up_7d}`).
-* **Przedział ufności 95% (Zasięg 7-dniowy):** `{zasieg_mc_7d}` – Statystycznie cena powinna utrzymać się w tym zakresie przez najbliższy tydzień.
+* **Mediana prognozy (Cel za 10 dni):** `{prognoza_10d}` (Prawdopodobieństwo wzrostu wyceniono na `{prob_up_10d}`).
+* **Przedział ufności 95% (Zasięg 10-dniowy):** `{zasieg_mc_10d}` – Statystycznie cena powinna utrzymać się w tym zakresie przez najbliższe 10 dni.
 
 #### 5. 🛡️ Inżynieria Ryzyka
 *Defensywna ocena parametrów wyjścia z pozycji, chroniąca kapitał przed rynkowym szumem.*
 * **Architektura Ceny:** Aktualne lokalne wsparcie znajduje się przy **{support_str}**, podczas gdy opór powstrzymujący wzrosty to **{resistance_str}**.
-* **Dynamiczny Stop Loss (ATR):** Poziom wyjścia awaryjnego ustalony jest na **{sl_str}**. Zastosowanie podwójnego mnożnika wskaźnika zmienności (ATR) chroni przed przypadkowym wybiciem na knotach, gwarantując bufor bezpieczeństwa.
-* **Cel Taktyczny (TP1 bazujący na ATR):** `{fmt(target_tp1)} $`
+* **Dynamiczny Stop Loss (ATR):** Poziom wyjścia awaryjnego ustalony jest na **{sl_str}**.
+* **Cel Taktyczny (TP1: +6% Zysku):** `{fmt(target_tp1)} $`
 
 ---
 #### 📝 PODSUMOWANIE ANALIZY
@@ -673,7 +679,7 @@ if not df_ml.empty:
         for i, (_, row) in enumerate(okazje_df.iterrows()):
             with cols_okazje[i % len(cols_okazje)]:
                 score_val = float(row['Smart Score (%)'])
-                st.success(f"**{row['Token']}**\n\nCena: `{row['Cena ($)']}`\nSmart Score: **{score_val:.2f}%**\nPrognoza 7D: **{row['Prognoza 7D']}**")
+                st.success(f"**{row['Token']}**\n\nCena: `{row['Cena ($)']}`\nSmart Score: **{score_val:.2f}%**\nPrognoza 10D: **{row['Prognoza 10D']}**")
     else:
         st.info("Obecnie żaden token nie spełnia restrykcyjnych warunków algorytmu.")
 
@@ -686,7 +692,7 @@ if st.button("🔄 Odśwież dane", type="primary"):
 df_ta_clean = df_ta.drop(columns=["Price_Raw", "EMA200_Raw", "Support_Raw", "Resistance_Raw", "RSI_1H_Raw", "RSI_4H_Raw", "RSI_1D_Raw", "RVOL_Raw", "VWAP_Raw", "OBV_Raw", "Regime_Raw", "Vol_Raw", "Drift_Raw", "Is_Bouncing", "ATR_Raw"], errors="ignore")
 if "Atrakcyjność (%)" not in df_ta_clean.columns and not df_ml.empty: df_ta_clean["Atrakcyjność (%)"] = df_ml["Smart Score (%)"]
 
-df_ml_widok = df_ml.drop(columns=["Prognoza_7D_Raw"], errors="ignore") if not df_ml.empty else df_ml
+df_ml_widok = df_ml.drop(columns=["Prognoza_10D_Raw"], errors="ignore") if not df_ml.empty else df_ml
 
 config_tabel = {
     "Atrakcyjność (%)": st.column_config.NumberColumn("Atrakcyjność (%)", format="%.2f"),
@@ -717,7 +723,7 @@ with tab2:
     if col_sel_btn.button("🚀 Dodaj do śledzenia", type="primary"):
         cena_we = float(df_ta[df_ta["Token"] == chosen_token].iloc[0]["Price_Raw"])
         atr = float(df_ta[df_ta["Token"] == chosen_token].iloc[0]["ATR_Raw"])
-        cel_7d = float(df_ml[df_ml["Token"] == chosen_token].iloc[0]["Prognoza_7D_Raw"])
+        cel_tp = cena_we * 1.06 # Sztywny cel 6%
         sl = cena_we - (2 * atr)
         
         nowa = pd.DataFrame([{
@@ -725,7 +731,7 @@ with tab2:
             "Token": chosen_token,
             "Typ Sygnału": "Dodano ręcznie",
             "Cena Wejścia ($)": round(cena_we, 5),
-            "Cel 7D ($)": round(cel_7d, 5),
+            "Cel TP (6%) ($)": round(cel_tp, 5),
             "SL ($)": round(sl, 5),
             "Ekstremum ($)": round(cena_we, 5),
             "Data Wyjścia": "-",
@@ -735,7 +741,7 @@ with tab2:
         
         df_h = pd.concat([pd.read_csv(HISTORY_FILE), nowa], ignore_index=True) if os.path.exists(HISTORY_FILE) else nowa
         df_h.to_csv(HISTORY_FILE, index=False)
-        st.success(f"Rozpoczęto śledzenie {chosen_token} po ${fmt(cena_we)}!")
+        st.success(f"Rozpoczęto śledzenie {chosen_token} po ${fmt(cena_we)} z celem TP (+6%): ${fmt(cel_tp)}!")
         st.rerun()
 
 with tab3:
@@ -753,7 +759,7 @@ with tab4:
         df_closed = df_hist[~df_hist["Status"].str.contains("W toku", na=False)]
         if not df_closed.empty: 
             st.dataframe(apply_high_contrast_striping(df_closed.sort_values("Data Wyjścia", ascending=False)), use_container_width=True)
-        else: st.info("Algorytm nie zamknął jeszcze żadnej transakcji (żadna cena nie dotarła do TP, SL ani nie minęło 7 dni).")
+        else: st.info("Algorytm nie zamknął jeszcze żadnej transakcji (żadna cena nie dotarła do TP, SL ani nie minęło 10 dni).")
     else: st.info("Brak zamkniętych.")
 
 with tab5:
@@ -776,7 +782,7 @@ with tab5:
             st.markdown("### Dystrybucja zysków/strat po zamknięciu")
             st.bar_chart(df_closed.set_index("Token")["Zysk (%)"])
         else:
-            st.info("Algorytm zbiera dane... Musisz poczekać na pierwsze zamknięcia pozycji (TP, SL lub limit 7 dni), aby policzyć skuteczność.")
+            st.info("Algorytm zbiera dane... Musisz poczekać na pierwsze zamknięcia pozycji (TP, SL lub limit 10 dni), aby policzyć skuteczność.")
     else:
         st.info("Brak pliku z historią.")
 
