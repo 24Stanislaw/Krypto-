@@ -46,41 +46,6 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# PANEL BOCZNY (ZARZĄDZANIE I FILTRY ALGORYTMU)
-# ==========================================
-with st.sidebar:
-    st.subheader("⚙️ Narzędzia i Zarządzanie")
-    if st.button("🗑️ Resetuj historię i zacznij od nowa", type="secondary"):
-        HISTORY_FILE = "signals_history.csv"
-        if os.path.exists(HISTORY_FILE):
-            try:
-                os.remove(HISTORY_FILE)
-            except Exception:
-                pass
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.success("Wyczyszczono historię i stan aplikacji!")
-        st.rerun()
-    
-    st.divider()
-    
-    st.subheader("🎛️ Parametry Algorytmu (Smart Score)")
-    st.caption("Dostosuj restrykcyjność sygnałów zakupowych")
-    
-    min_smart_score = st.slider(
-        "Minimalny Smart Score (%)", min_value=0.0, max_value=100.0, value=65.0, step=1.0,
-        help="Im wyższy wynik, tym silniejszy trend i lepsze parametry wolumenu."
-    )
-    max_rsi_4h = st.slider(
-        "Maksymalny RSI 4H", min_value=10.0, max_value=90.0, value=60.0, step=1.0,
-        help="Odfiltruj tokeny, które są już lokalnie przegrzane/wykupione."
-    )
-    wymagaj_akumulacji = st.checkbox(
-        "Wymagaj Akumulacji (OBV)", value=True,
-        help="Odrzuca tokeny, w których duży kapitał realizuje zyski (Dystrybucja)."
-    )
-
-# ==========================================
 # LISTA TOKENÓW SPOT (COINBASE)
 # ==========================================
 TOKENS = [
@@ -102,6 +67,28 @@ TOKENS = [
     {"symbol": "SOL", "coinbase": "SOL-USD", "gecko_id": "solana"},
 ]
 
+HISTORY_FILE = "signals_history.csv"
+
+# ==========================================
+# BEZPIECZNA OBSŁUGA HISTORII (I/O)
+# ==========================================
+def safe_read_history():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            return pd.read_csv(HISTORY_FILE)
+        except Exception:
+            return pd.DataFrame()
+    return pd.DataFrame()
+
+def safe_save_history(df):
+    try:
+        df.to_csv(HISTORY_FILE, index=False)
+    except Exception as e:
+        st.error(f"Błąd zapisu historii: {e}")
+
+# ==========================================
+# FUNKCJE POBIERANIA DANYCH I WSKAŹNIKÓW
+# ==========================================
 def fmt(val):
     if pd.isna(val) or val is None: return "-"
     if isinstance(val, (int, float)):
@@ -110,9 +97,6 @@ def fmt(val):
         else: return round(val, 2)
     return val
 
-# ==========================================
-# FUNKCJE POBIERANIA DANYCH I WSKAŹNIKÓW
-# ==========================================
 @st.cache_data(ttl=600)
 def get_fear_and_greed():
     try:
@@ -121,7 +105,7 @@ def get_fear_and_greed():
     except Exception:
         return 50, "Neutral"
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=900)
 def get_global_market_data():
     try:
         res = requests.get(
@@ -346,7 +330,6 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         obv_status = str(row.get("OBV_Raw", ""))
         rvol = float(row.get("RVOL_Raw", 1.0))
 
-        # Symulacja Monte Carlo
         adjusted_drift = drift_1h - (0.5 * (vol_1h**2))
         shocks = rng.normal(loc=adjusted_drift, scale=vol_1h, size=(3000, 24))
         final_prices = price * np.exp(np.cumsum(shocks, axis=1)[:, -1])
@@ -355,7 +338,6 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         ci_upper = float(np.percentile(final_prices, 97.5))
         prob_up = float(np.mean(final_prices > price) * 100)
 
-        # SMART SCORE v2 - Precyzyjne liczenie
         score = 50.0 
         
         if "Silny Trend Wzrostowy" in regime: score += 30.0
@@ -373,7 +355,6 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
 
         score = max(0.0, min(100.0, score))
 
-        # WERDYKT ALGORYTMU
         is_altcoin = symbol not in ["BTC", "ETH"]
         macro_headwind = btc_dom > 59.0 and is_altcoin
 
@@ -399,16 +380,11 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
     df_ml["Atrakcyjność (%)"] = df_ml["Smart Score (%)"]
     return df_ml[["Token", "Cena ($)", "Reżim Rynkowy", "Atrakcyjność (%)", "Smart Score (%)", "Prognoza MC (24h)", "Zasięg Monte Carlo (95%)", "Ocena Przewagi (Edge)", "Prawdopodobieństwo"]]
 
-
 # ==========================================
 # HISTORIA I BACKTESTING
 # ==========================================
-HISTORY_FILE = "signals_history.csv"
-
 def update_history_status(df_ta):
-    if not os.path.exists(HISTORY_FILE): return
-    try: df_hist = pd.read_csv(HISTORY_FILE)
-    except Exception: return
+    df_hist = safe_read_history()
     if df_hist.empty: return
     now_dt = pd.Timestamp.now()
     now_date = now_dt.strftime("%Y-%m-%d")
@@ -439,13 +415,11 @@ def update_history_status(df_ta):
         updated = True
         
     if updated:
-        df_hist.to_csv(HISTORY_FILE, index=False)
+        safe_save_history(df_hist)
 
 def get_backtest_stats(target_pct_str):
-    if not os.path.exists(HISTORY_FILE): return pd.DataFrame(), 0, 0, 0.0
-    try: df_hist = pd.read_csv(HISTORY_FILE)
-    except Exception: return pd.DataFrame(), 0, 0, 0.0
-    if df_hist.empty: return df_hist, 0, 0, 0.0
+    df_hist = safe_read_history()
+    if df_hist.empty: return pd.DataFrame(), 0, 0, 0.0
     col_tp = f"TP {target_pct_str}"
     wins, total, results = 0, 0, []
     for _, row in df_hist.iterrows():
@@ -542,13 +516,77 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
 """
 
 # ==========================================
-# INTERFEJS GŁÓWNY (UI)
+# DANE NA ŻYWO I WYLICZENIA
 # ==========================================
 with st.spinner("🔄 Pobieram dane na żywo z API (Coinbase/CoinGecko) i liczę logikę pro..."):
     df_ta, fng_val, fng_class, btc_dom, alt_season, loaded_c, total_c = fetch_technical_analysis()
-    df_ml = run_predictions(df_ta, btc_dom, min_smart_score, max_rsi_4h, wymagaj_akumulacji)
-    update_history_status(df_ta)
 
+# ==========================================
+# PANEL BOCZNY (ZARZĄDZANIE, FILTRY I KALKULATOR RYZYKA)
+# ==========================================
+with st.sidebar:
+    st.subheader("⚙️ Narzędzia i Zarządzanie")
+    if st.button("🗑️ Resetuj historię i zacznij od nowa", type="secondary"):
+        if os.path.exists(HISTORY_FILE):
+            try: os.remove(HISTORY_FILE)
+            except Exception: pass
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.success("Wyczyszczono historię i stan aplikacji!")
+        st.rerun()
+    
+    st.divider()
+    
+    st.subheader("🎛️ Parametry Algorytmu (Smart Score)")
+    st.caption("Dostosuj restrykcyjność sygnałów zakupowych")
+    
+    min_smart_score = st.slider(
+        "Minimalny Smart Score (%)", min_value=0.0, max_value=100.0, value=65.0, step=1.0,
+        help="Im wyższy wynik, tym silniejszy trend i lepsze parametry wolumenu."
+    )
+    max_rsi_4h = st.slider(
+        "Maksymalny RSI 4H", min_value=10.0, max_value=90.0, value=60.0, step=1.0,
+        help="Odfiltruj tokeny, które są już lokalnie przegrzane/wykupione."
+    )
+    wymagaj_akumulacji = st.checkbox(
+        "Wymagaj Akumulacji (OBV)", value=True,
+        help="Odrzuca tokeny, w których duży kapitał realizuje zyski (Dystrybucja)."
+    )
+
+    # DODATEK: Kalkulator Ryzyka i Pozycji
+    st.divider()
+    st.subheader("🧮 Kalkulator Pozycji (Risk Engine)")
+    
+    kapital_portfela = st.number_input("Kapitał Portfela ($)", min_value=100.0, value=5000.0, step=100.0)
+    ryzyko_pct = st.slider("Ryzyko na transakcję (%)", min_value=0.5, max_value=5.0, value=1.5, step=0.1)
+    
+    kwota_ryzyka = kapital_portfela * (ryzyko_pct / 100.0)
+    st.caption(f"Maksymalna akceptowalna strata ($R$): **${kwota_ryzyka:.2f}**")
+    
+    if not df_ta.empty:
+        tok_calc = st.selectbox("Oblicz wielkość dla:", df_ta["Token"].tolist(), key="risk_calc_token")
+        row_c = df_ta[df_ta["Token"] == tok_calc].iloc[0]
+        
+        p_entry = float(row_c["Price_Raw"])
+        sl_raw_str = str(row_c["SL (ATR)"]).replace("$", "").replace(",", "").strip()
+        try: p_sl = float(sl_raw_str)
+        except Exception: p_sl = p_entry * 0.95
+        
+        dist_pct = abs((p_entry - p_sl) / p_entry) if p_entry > 0 else 0.05
+        if dist_pct > 0:
+            position_size_usd = kwota_ryzyka / dist_pct
+            st.info(
+                f"**Sugerowany rozmiar pozycji:**\n\n"
+                f"• Wartość pozycji: **${position_size_usd:.2f}**\n"
+                f"• Poziom Stop Loss: **${p_sl:.4f}** (-{dist_pct*100:.2f}%)"
+            )
+
+df_ml = run_predictions(df_ta, btc_dom, min_smart_score, max_rsi_4h, wymagaj_akumulacji)
+update_history_status(df_ta)
+
+# ==========================================
+# INTERFEJS GŁÓWNY (UI)
+# ==========================================
 col_t, col_d1, col_d2, col_f = st.columns([2.0, 1, 1, 1])
 col_t.title("📊 Analiza Krypto MTF Pro")
 col_t.caption(f"Aktualizacja: {pd.Timestamp.now().strftime('%H:%M:%S')} | Załadowano: {loaded_c}/{total_c}")
@@ -580,7 +618,7 @@ if st.button("🔄 Odśwież dane", type="primary"):
 df_ta_clean = df_ta.drop(columns=["Price_Raw", "EMA200_Raw", "Support_Raw", "Resistance_Raw", "RSI_1H_Raw", "RSI_4H_Raw", "RSI_1D_Raw", "RVOL_Raw", "VWAP_Raw", "OBV_Raw", "Regime_Raw", "Vol_Raw", "Drift_Raw", "Is_Bouncing"], errors="ignore")
 if "Atrakcyjność (%)" not in df_ta_clean.columns and not df_ml.empty: df_ta_clean["Atrakcyjność (%)"] = df_ml["Smart Score (%)"]
 
-# Konfiguracja wyświetlania tabel
+# Konfiguracja wyświetlania tabel z precyzyjnym formatowaniem liczb
 config_tabel = {
     "Atrakcyjność (%)": st.column_config.NumberColumn("Atrakcyjność (%)", format="%.2f"),
     "Smart Score (%)": st.column_config.NumberColumn("Smart Score (%)", format="%.2f"),
@@ -603,32 +641,27 @@ with tab2:
     if col_sel_btn.button("🚀 Dodaj do aktywnych", type="primary"):
         price_clean = float(df_ta[df_ta["Token"] == chosen_token].iloc[0]["Price_Raw"])
         new_entry = pd.DataFrame([{"Data": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"), "Token": chosen_token, "Typ Sygnału": df_ml[df_ml["Token"] == chosen_token].iloc[0]["Ocena Przewagi (Edge)"], "Cena Wejścia": price_clean, "Ekstremum Ceny": price_clean, "TP 5%": "-", "TP 7.5%": "-", "TP 10%": "-", "Status": "🔄 W toku (0/30d)"}])
-        df_h = pd.concat([pd.read_csv(HISTORY_FILE), new_entry], ignore_index=True) if os.path.exists(HISTORY_FILE) else new_entry
-        df_h.to_csv(HISTORY_FILE, index=False)
+        df_h = safe_read_history()
+        df_h = pd.concat([df_h, new_entry], ignore_index=True) if not df_h.empty else new_entry
+        safe_save_history(df_h)
         st.success(f"Dodano {chosen_token} po ${fmt(price_clean)}!")
         st.rerun()
 
 with tab3:
-    if os.path.exists(HISTORY_FILE):
-        try:
-            df_hist_file = pd.read_csv(HISTORY_FILE)
-            df_active = df_hist_file[df_hist_file["Status"].astype(str).str.contains("W toku", na=False)]
-            if not df_active.empty: st.dataframe(df_active.sort_values("Data", ascending=False), use_container_width=True)
-            else: st.info("Brak aktywnych pozycji.")
-        except Exception:
-            st.info("Brak aktywnych pozycji.")
-    else: st.info("Brak danych.")
+    df_hist_file = safe_read_history()
+    if not df_hist_file.empty:
+        df_active = df_hist_file[df_hist_file["Status"].astype(str).str.contains("W toku", na=False)]
+        if not df_active.empty: st.dataframe(df_active.sort_values("Data", ascending=False), use_container_width=True)
+        else: st.info("Brak aktywnych pozycji.")
+    else: st.info("Brak aktywnych pozycji.")
 
 with tab4:
-    if os.path.exists(HISTORY_FILE):
-        try:
-            df_hist_file = pd.read_csv(HISTORY_FILE)
-            df_closed = df_hist_file[~df_hist_file["Status"].astype(str).str.contains("W toku", na=False)]
-            if not df_closed.empty: st.dataframe(df_closed.sort_values("Data", ascending=False), use_container_width=True)
-            else: st.info("Brak zamkniętych pozycji.")
-        except Exception:
-            st.info("Brak zamkniętych pozycji.")
-    else: st.info("Brak danych.")
+    df_hist_file = safe_read_history()
+    if not df_hist_file.empty:
+        df_closed = df_hist_file[~df_hist_file["Status"].astype(str).str.contains("W toku", na=False)]
+        if not df_closed.empty: st.dataframe(df_closed.sort_values("Data", ascending=False), use_container_width=True)
+        else: st.info("Brak zamkniętych pozycji.")
+    else: st.info("Brak danych w archiwum.")
 
 with tab5:
     t_choice = st.radio("Próg TP / SL:", ["5%", "7.5%", "10%"], horizontal=True)
