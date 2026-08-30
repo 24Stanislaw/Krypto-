@@ -621,7 +621,7 @@ config_tabel = {
 # Funkcja stylizująca Pandas Styler pod kątem kolorowania co drugiego wiersza (Zebra Striping)
 def apply_zebra_striping(df):
   return df.style.apply(
-      lambda row: ['background-color: #1a1e24' if row.name % 2 == 1 else 'background-color: #0e1117' for _ in row],
+      lambda row: ['background-color: #1a1e24; color: #ffffff;' if row.name % 2 == 1 else 'background-color: #0e1117; color: #ffffff;' for _ in row],
       axis=1
   )
 
