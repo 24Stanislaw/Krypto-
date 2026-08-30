@@ -5,7 +5,7 @@ import requests
 import streamlit as st
 
 # ==========================================
-# KONFIGURACJA STRONY I BIAŁE TŁO
+# KONFIGURACJA STRONY I MOCNIEJSZY KONTRAST
 # ==========================================
 st.set_page_config(page_title="Analiza Krypto MTF Pro", layout="wide")
 
@@ -14,7 +14,11 @@ st.markdown(
     <style>
     .stApp {
         background-color: #ffffff;
-        color: #111111;
+        color: #0b0f19;
+    }
+    /* Wyraźniejsze obramowanie i nagłówki tabel dla lepszego kontrastu */
+    dataframe, th, td {
+        border-color: #d1d5db !important;
     }
     </style>
     """,
@@ -361,18 +365,15 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
 
     score = 50.0 
     
-    # Płynny wpływ reżimu rynkowego
     if "Silny Trend Wzrostowy" in regime: score += 25.0
     elif "Korekta" in regime: score += 10.0
     elif "Spadkowy" in regime: score -= 20.0
 
-    # Płynna wycena wolumenu (RVOL) - skala proporcjonalna wokół średniej 1.0x
     score += (rvol - 1.0) * 20.0  
 
     if "Akumulacja" in obv_status: score += 12.0
     elif "Dystrybucja" in obv_status: score -= 15.0
 
-    # Płynna korekta za RSI 4H
     if rsi_4h < 45: score += (45 - rsi_4h) * 0.4
     elif rsi_4h > 65: score -= (rsi_4h - 65) * 0.6
 
@@ -455,7 +456,7 @@ def get_backtest_stats(target_pct_str):
   return pd.DataFrame(results), total, wins, round((wins / total) * 100, 1) if total > 0 else 0.0
 
 # ==========================================
-# OBSZERNY RAPORT AI (EKSPERCKI ROZBID)
+# OBSZERNY RAPORT AI (UWZGLĘDNIA SMART SCORE I MC)
 # ==========================================
 def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
   symbol = row_ta.get("Token", "UNKNOWN")
@@ -474,16 +475,17 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
   smart_score = f"{float(raw_smart_score):.2f}"
   
   prognoza_mc = row_ml.get("Prognoza MC (24h)", "-") if row_ml is not None else "-"
+  zasieg_mc = row_ml.get("Zasięg Monte Carlo (95%)", "-") if row_ml is not None else "-"
   prob_up = row_ml.get("Prawdopodobieństwo", "-") if row_ml is not None else "-"
 
   if "Silny Trend" in regime: 
-      pa_wniosek = "Pełna dominacja popytu. Ruch charakteryzuje się wysoka dynamiką, a pozycje pro-trendowe mają najwyższą przewagę statystyczną."
+      pa_wniosek = "Pełna dominacja popytu. Ruch charakteryzuje się wysoką dynamiką, a pozycje pro-trendowe mają najwyższą przewagę statystyczną."
       pa_stan = f"Cena na poziomie `${fmt(price_raw)}` notowana jest wysoce powyżej długoterminowej średniej EMA200 (`${fmt(ema_raw)}`)."
   elif "Korekta" in regime: 
       pa_wniosek = "Klasyczny układ 'kupna po obniżce' (buy the dip). Popyt broni fundamentalnej średniej, co daje dobre R:R."
       pa_stan = f"Cena (`${fmt(price_raw)}`) cofa się lokalnie, ale utrzymuje obronny pułap ponad EMA200 (`${fmt(ema_raw)}`)."
   elif "Spadkowy" in regime: 
-      pa_wniosek = "Rynek jest w rykach niedźwiedzi. Każde lokalne podbicie ceny stanowi szansę na realizację dystrybucji przez duży kapitał."
+      pa_wniosek = "Rynek jest w rękach niedźwiedzi. Każde lokalne podbicie ceny stanowi szansę na realizację dystrybucji przez duży kapitał."
       pa_stan = f"Cena (`${fmt(price_raw)}`) znajduje się pod presją podażową poniżej kluczowej średniej EMA200 (`${fmt(ema_raw)}`)."
   else: 
       pa_wniosek = "Brak jednoznacznego trendu wyższego rzędu. Należy ograniczyć aktywność do czasu wybicia z konsolidacji."
@@ -561,10 +563,12 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
   * *Prezentacja danych:* Histogram plasuje się na poziomie `{fmt(macd_hist)}`.
   * *Wniosek operacyjny:* Wartości dodatnie świadczą o przyspieszaniu fali wzrostowej, wartości ujemne ostrzegają przed pogłębieniem korekty.
 
-#### 4. 🎲 Analiza Stochastyczna (Monte Carlo 24h)
-* *O co chodzi:* Algorytm wykonuje 5000 symulacji losowych ścieżek cenowych w oparciu o historyczną zmienność i dryf aktywa.
-* *Prezentacja danych:* Prognoza mediany: `{prognoza_mc}` (Szansa na wzrost: `{prob_up}`).
-* *Wniosek operacyjny:* Wynik powyżej 55% zyskuje przewagę statystyczną, umożliwiając bezpieczniejsze planowanie transakcji.
+#### 4. 🎲 Ocena Algorytmiczna (Smart Score & Prognoza Monte Carlo 24h)
+* **Smart Score ({smart_score}%):** Kompleksowa ocena przewagi rynkowej wyliczana na podstawie dynamiki reżimu, RVOL, OBV oraz wskaźników pędu.
+* **Symulacja Monte Carlo (24h):** 
+  * *Mediana prognozy:* `{prognoza_mc}` (Szansa na wzrost: `{prob_up}`)
+  * *Przedział ufności (95%):* `{zasieg_mc}`
+* *Wniosek operacyjny:* Integracja ciągłego Smart Score oraz symulacji stochastycznej pozwala ocenić, czy bieżąca wycena posiada matematycznie uzasadniony potencjał wzrostowy w perspektywie dobowej.
 
 #### 5. 🛡️ Inżynieria Ryzyka i Poziomy Operacyjne
 * *O co chodzi:* Zastosowanie wskaźnika ATR (Average True Range) do dynamicznego wyznaczenia bufora bezpieczeństwa z dala od szumu.
@@ -627,19 +631,19 @@ config_tabel = {
     "RSI 1D": st.column_config.NumberColumn("RSI 1D", format="%.1f"),
 }
 
-# Funkcja stylizująca Pandas Styler pod kątem jasnego tła i czytelnej czcionki
-def apply_zebra_striping(df):
+# Funkcja stylizująca Pandas Styler pod kątem mocniejszego kontrastu (ciemny tekst, wyraźna siatka)
+def apply_high_contrast_striping(df):
   return df.style.apply(
-      lambda row: ['background-color: #f7f9fa; color: #111111;' if row.name % 2 == 1 else 'background-color: #ffffff; color: #111111;' for _ in row],
+      lambda row: ['background-color: #f1f5f9; color: #0b0f19; font-weight: 500;' if row.name % 2 == 1 else 'background-color: #ffffff; color: #0b0f19; font-weight: 500;' for _ in row],
       axis=1
   )
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["1. Reżimy", "2. Ocena Przewagi (Smart Score)", "3. ⚡ Aktywne Pozycje", "4. 🗂️ Archiwum", "5. 📈 Backtest"])
 
 with tab1: 
-  st.dataframe(apply_zebra_striping(df_ta_clean), column_config=config_tabel, use_container_width=True)
+  st.dataframe(apply_high_contrast_striping(df_ta_clean), column_config=config_tabel, use_container_width=True)
 with tab2:
-  st.dataframe(apply_zebra_striping(df_ml.drop(columns=["Prawdopodobieństwo"], errors="ignore")), column_config=config_tabel, use_container_width=True)
+  st.dataframe(apply_high_contrast_striping(df_ml.drop(columns=["Prawdopodobieństwo"], errors="ignore")), column_config=config_tabel, use_container_width=True)
   st.markdown("---")
   st.subheader("➕ Otwórz i śledź wybraną pozycję ręcznie")
   col_sel_tok, col_sel_btn = st.columns([2, 1])
@@ -655,14 +659,14 @@ with tab2:
 with tab3:
   if os.path.exists(HISTORY_FILE):
     df_active = pd.read_csv(HISTORY_FILE)[pd.read_csv(HISTORY_FILE)["Status"].str.contains("W toku", na=False)]
-    if not df_active.empty: st.dataframe(apply_zebra_striping(df_active.sort_values("Data", ascending=False)), use_container_width=True)
+    if not df_active.empty: st.dataframe(apply_high_contrast_striping(df_active.sort_values("Data", ascending=False)), use_container_width=True)
     else: st.info("Brak aktywnych pozycji.")
   else: st.info("Brak danych.")
 
 with tab4:
   if os.path.exists(HISTORY_FILE):
     df_closed = pd.read_csv(HISTORY_FILE)[~pd.read_csv(HISTORY_FILE)["Status"].str.contains("W toku", na=False)]
-    if not df_closed.empty: st.dataframe(apply_zebra_striping(df_closed.sort_values("Data", ascending=False)), use_container_width=True)
+    if not df_closed.empty: st.dataframe(apply_high_contrast_striping(df_closed.sort_values("Data", ascending=False)), use_container_width=True)
     else: st.info("Brak zamkniętych.")
 
 with tab5:
@@ -671,7 +675,7 @@ with tab5:
   if tot > 0:
     k1, k2, k3 = st.columns(3)
     k1.metric("Sygnały", tot); k2.metric("Wygrane", wins); k3.metric("Win Rate", f"{wr}%")
-    st.dataframe(apply_zebra_striping(bt_df), use_container_width=True)
+    st.dataframe(apply_high_contrast_striping(bt_df), use_container_width=True)
   else: st.info("Brak rozliczonych.")
 
 if not df_ta.empty:
