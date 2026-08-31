@@ -1,5 +1,5 @@
-import os
 from datetime import datetime
+import os
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -131,11 +131,7 @@ TOKENS = [
     {"symbol": "PENDLE", "coinbase": "PENDLE-USD", "gecko_id": "pendle"},
     {"symbol": "NEAR", "coinbase": "NEAR-USD", "gecko_id": "near"},
     {"symbol": "PLUME", "coinbase": "PLUME-USD", "gecko_id": "plume"},
-    {
-        "symbol": "JUP",
-        "coinbase": "JUP-USD",
-        "gecko_id": "jupiter-exchange-solana",
-    },  # POPRAWIONE DLA SOLANY
+    {"symbol": "JUP", "coinbase": "JUP-USD", "gecko_id": "jupiter-exchange-solana"},
     {"symbol": "UNI", "coinbase": "UNI-USD", "gecko_id": "uniswap"},
     {"symbol": "SEI", "coinbase": "SEI-USD", "gecko_id": "sei-network"},
     {"symbol": "SOL", "coinbase": "SOL-USD", "gecko_id": "solana"},
@@ -516,7 +512,6 @@ def run_predictions(
     rvol = float(row.get("RVOL_Raw", 1.0))
     resistance = float(row.get("Resistance_Raw", price * 1.05))
 
-    # Symulacja 10 dni (240 godzin)
     adjusted_drift = drift_1h - (0.5 * (vol_1h**2))
     shocks = rng.normal(loc=adjusted_drift, scale=vol_1h, size=(5000, 240))
     cum_returns = np.exp(np.cumsum(shocks, axis=1))
