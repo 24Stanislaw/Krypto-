@@ -298,7 +298,8 @@ def fetch_technical_analysis():
             atr = float(tr.rolling(min(14, len(df_4h))).mean().iloc[-1]) if len(tr) > 0 else price * 0.02
             ema200_4h = float(df_4h["close"].ewm(span=min(200, len(df_4h)), adjust=False).mean().iloc[-1]) if len(df_4h) > 0 else price
 
-            sl = price - (2 * atr)
+            # [POPRRAWKA ANTY-FOMO] Szerszy i bezpieczniejszy SL (2.5 * ATR zamiast 2.0)
+            sl = price - (2.5 * atr)
             support = float(df_4h["low"].min()) if len(df_4h) > 0 else price * 0.95
             resistance = float(df_4h["high"].max()) if len(df_4h) > 0 else price * 1.05
 
@@ -332,7 +333,7 @@ def fetch_technical_analysis():
                 "Lp.": loaded_count + 1,
                 "Token": symbol, "Cena ($)": fmt(p), "24h (%)": round(chg, 2), "Reżim Rynkowy": "Brak danych / Konsolidacja",
                 "RSI 1H": 50.0, "RSI 4H": 50.0, "RSI 1D": 50.0, "RVOL (4H)": "1.0x", "VWAP (4H)": fmt(p),
-                "OBV Status": "Neutralny", "MACD Hist (4H)": "0.0", "EMA 200 (4H)": fmt(p), "SL (ATR)": fmt(p * 0.96),
+                "OBV Status": "Neutralny", "MACD Hist (4H)": "0.0", "EMA 200 (4H)": fmt(p), "SL (ATR)": fmt(p * 0.95),
                 "Wsparcie": fmt(p * 0.95), "Opór": fmt(p * 1.05), "R:R": "1:1.5", "Price_Raw": p, "EMA200_Raw": p,
                 "Support_Raw": p * 0.95, "Resistance_Raw": p * 1.05, "RSI_1H_Raw": 50.0, "RSI_4H_Raw": 50.0,
                 "RSI_1D_Raw": 50.0, "RVOL_Raw": 1.0, "VWAP_Raw": p, "OBV_Raw": "Neutralny", "Regime_Raw": "Konsolidacja",
@@ -357,9 +358,11 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         vol_1h = float(row.get("Vol_Raw", 0.015))
         drift_1h = float(row.get("Drift_Raw", 0.0))
         regime = row["Regime_Raw"]
+        rsi_1h = float(row["RSI_1H_Raw"])
         rsi_4h = float(row["RSI_4H_Raw"])
         obv_status = str(row.get("OBV_Raw", ""))
         rvol = float(row.get("RVOL_Raw", 1.0))
+        resistance = float(row.get("Resistance_Raw", price * 1.05))
 
         # Symulacja 10 dni (240 godzin)
         adjusted_drift = drift_1h - (0.5 * (vol_1h**2))
@@ -394,12 +397,21 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         is_altcoin = symbol not in ["BTC", "ETH"]
         macro_headwind = btc_dom > 59.0 and is_altcoin
 
-        if macro_headwind: signal = "⏳ ODRZUCONY (Silna dominacja BTC)"
+        # [POPRRAWKA ANTY-FOMO] Dodatkowy filtr: odrzucamy, jeśli RSI 1H jest przegrzane (>65) 
+        # lub cena jest tuż przy oporze (brak miejsca na wzrost, ryzyko korekty).
+        is_overextended = (rsi_1h > 65.0) or (price >= resistance * 0.99)
+
+        if macro_headwind: 
+            signal = "⏳ ODRZUCONY (Silna dominacja BTC)"
+        elif is_overextended: 
+            signal = "❌ ODRZUCONY (Przegrzany – Unikamy szczytu)"
         elif score >= min_score_filter and rsi_4h <= max_rsi_filter:
             if req_accumulation and "Akumulacja" not in obv_status: signal = "🟡 NEUTRALNY (Brak akumulacji)"
             else: signal = "🟢 WYSOKI EDGE (Solidna Okazja Zakupowa)"
-        elif score >= 55.0: signal = "🟡 NEUTRALNY (Wymaga obserwacji)"
-        else: signal = "❌ ODRZUCONY (Słaba struktura/podaż)"
+        elif score >= 55.0: 
+            signal = "🟡 NEUTRALNY (Wymaga obserwacji)"
+        else: 
+            signal = "❌ ODRZUCONY (Słaba struktura/podaż)"
 
         return pd.Series([
             f"${fmt(p_24h)}", f"${fmt(p_3d)}", f"${fmt(p_10d)}",
@@ -470,7 +482,7 @@ def auto_zapisz_sygnaly(df_ml, df_ta):
             atr = float(df_ta[df_ta["Token"] == token].iloc[0]["ATR_Raw"])
             
             cel_tp = cena_we * 1.06
-            sl = cena_we - (2 * atr)
+            sl = cena_we - (2.5 * atr)  # Spójne z poprawką SL
 
             nowe_wiersze.append({
                 "Data Wejścia": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
@@ -677,7 +689,7 @@ if not df_ml.empty:
                 score_val = float(row['Smart Score (%)'])
                 st.success(f"**{row['Token']}**\n\nCena: `{row['Cena ($)']}`\nSmart Score: **{score_val:.2f}%**\nPrognoza 10D: **{row['Prognoza 10D']}**")
     else:
-        st.info("Obecnie żaden token nie spełnia restrykcyjnych warunków algorytmu.")
+        st.info("Obecnie żaden token nie spełnia restrykcyjnych warunków algorytmu (odfiltrowano przegrzane aktywa).")
 
 st.markdown("---")
 
@@ -721,7 +733,7 @@ with tab2:
         cena_we = float(df_ta[df_ta["Token"] == chosen_token].iloc[0]["Price_Raw"])
         atr = float(df_ta[df_ta["Token"] == chosen_token].iloc[0]["ATR_Raw"])
         cel_tp = cena_we * 1.06
-        sl = cena_we - (2 * atr)
+        sl = cena_we - (2.5 * atr)
         
         nowa = pd.DataFrame([{
             "Data Wejścia": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
@@ -749,7 +761,7 @@ with tab3:
             if not df_active.empty: 
                 st.dataframe(apply_high_contrast_striping(df_active.sort_values("Data Wejścia", ascending=False)), use_container_width=True, hide_index=True)
             else: 
-                st.info("Brak aktywnych pozycji (żaden token nie spełnia obecnie warunków zakupu).")
+                st.info("Brak aktywnych pozycji (żaden token nie spełnia obecnie warunków zakupu po odfiltrowaniu szczytów).")
         except Exception:
             st.info("Brak aktywnych pozycji.")
     else: 
@@ -763,7 +775,7 @@ with tab4:
             if not df_closed.empty: 
                 st.dataframe(apply_high_contrast_striping(df_closed.sort_values("Data Wyjścia", ascending=False)), use_container_width=True, hide_index=True)
             else: 
-                st.info("Algorytm nie zamknął jeszcze żadnej transakcji (żadna cena nie dotarła do TP, SL ani nie minęło 10 dni).")
+                st.info("Algorytm nie zamknął jeszcze żadnej transakcji po nowych regułach.")
         except Exception:
             st.info("Brak zamkniętych pozycji.")
     else: 
@@ -790,7 +802,7 @@ with tab5:
                 st.markdown("### Dystrybucja zysków/strat po zamknięciu")
                 st.bar_chart(df_closed.set_index("Token")["Zysk (%)"])
             else:
-                st.info("Algorytm zbiera dane... Musisz poczekać na pierwsze zamknięcia pozycji (TP, SL lub limit 10 dni), aby policzyć skuteczność.")
+                st.info("Algorytm zbiera dane... Poczekaj na pierwsze zamknięcia pozycji w archiwum.")
         except Exception:
             st.info("Brak opublikowanych zamkniętych pozycji.")
     else:
