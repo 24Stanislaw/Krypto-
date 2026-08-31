@@ -116,7 +116,6 @@ TOKENS = [
     {"symbol": "JUP", "coinbase": None, "gecko_id": "jupiter-exchange-solana"},
     {"symbol": "UNI", "coinbase": "UNI-USD", "gecko_id": "uniswap"},
     {"symbol": "SEI", "coinbase": "SEI-USD", "gecko_id": "sei-network"},
-    {"symbol": "KTA", "coinbase": "KTA-USD", "gecko_id": "keeta"},
     {"symbol": "SOL", "coinbase": "SOL-USD", "gecko_id": "solana"},
 ]
 
