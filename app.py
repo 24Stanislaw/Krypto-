@@ -113,7 +113,7 @@ with st.sidebar:
   )
 
 # ==========================================
-# LISTA TOKENÓW SPOT (Z POPRAWIONYM JUP)
+# LISTA TOKENÓW SPOT
 # ==========================================
 TOKENS = [
     {"symbol": "ONDO", "coinbase": "ONDO-USD", "gecko_id": "ondo-finance"},
@@ -131,7 +131,6 @@ TOKENS = [
     {"symbol": "PENDLE", "coinbase": "PENDLE-USD", "gecko_id": "pendle"},
     {"symbol": "NEAR", "coinbase": "NEAR-USD", "gecko_id": "near"},
     {"symbol": "PLUME", "coinbase": "PLUME-USD", "gecko_id": "plume"},
-    # Poprawka: JUP pobierany wyłącznie z CoinGecko (omijamy stary token ERC-20 na Coinbase)
     {"symbol": "JUP", "coinbase": None, "gecko_id": "jupiter-exchange-solana"},
     {"symbol": "UNI", "coinbase": "UNI-USD", "gecko_id": "uniswap"},
     {"symbol": "SEI", "coinbase": "SEI-USD", "gecko_id": "sei-network"},
@@ -243,16 +242,29 @@ def fetch_from_coinbase(symbol_pair, granularity=3600):
 
 
 def fetch_from_coingecko(gecko_id):
-  url = f"https://api.coingecko.com/api/v3/coins/{gecko_id}/ohlc?vs_currency=usd&days=14"
+  url = f"https://api.coingecko.com/api/v3/coins/{gecko_id}/market_chart?vs_currency=usd&days=14"
   res = requests.get(
-      url, headers={"User-Agent": "CryptoDashboard/1.0"}, timeout=5
+      url, headers={"User-Agent": "CryptoDashboard/1.0"}, timeout=6
   )
   res.raise_for_status()
-  df = pd.DataFrame(
-      res.json(), columns=["timestamp", "open", "high", "low", "close"]
-  )
+  data = res.json()
+
+  prices = data.get("prices", [])
+  volumes = data.get("total_volumes", [])
+
+  if not prices:
+    return pd.DataFrame()
+
+  df_p = pd.DataFrame(prices, columns=["timestamp", "close"])
+  df_v = pd.DataFrame(volumes, columns=["timestamp", "volume"])
+
+  df = pd.merge(df_p, df_v, on="timestamp")
   df["dt"] = pd.to_datetime(df["timestamp"], unit="ms")
-  df["volume"] = 0.0
+
+  df["open"] = df["close"].shift(1).fillna(df["close"])
+  df["high"] = df[["open", "close"]].max(axis=1)
+  df["low"] = df[["open", "close"]].min(axis=1)
+
   return df.sort_values("dt").reset_index(drop=True)
 
 
@@ -260,7 +272,7 @@ def get_candles_1h(token_info):
   if token_info.get("coinbase"):
     try:
       df = fetch_from_coinbase(token_info["coinbase"], granularity=3600)
-      if not df.empty and len(df) >= 20:
+      if not df.empty and len(df) >= 5:
         return df
     except Exception:
       pass
@@ -274,7 +286,7 @@ def get_candles_1d(token_info):
   if token_info.get("coinbase"):
     try:
       df = fetch_from_coinbase(token_info["coinbase"], granularity=86400)
-      if not df.empty and len(df) >= 14:
+      if not df.empty and len(df) >= 5:
         return df
     except Exception:
       pass
@@ -299,6 +311,9 @@ def resample_ohlc(df_1h, rule):
 
 
 def calc_rsi(series, period=14):
+  if len(series) < 2:
+    return 50.0
+  period = min(period, len(series) - 1)
   delta = series.diff()
   gain = delta.clip(lower=0).rolling(period).mean()
   loss = (-delta.clip(upper=0)).rolling(period).mean()
@@ -307,10 +322,14 @@ def calc_rsi(series, period=14):
 
 
 def calc_macd(series, span1=12, span2=26, signal=9):
-  exp1 = series.ewm(span=span1, adjust=False).mean()
-  exp2 = series.ewm(span=span2, adjust=False).mean()
+  if len(series) < 5:
+    return 0.0, 0.0, 0.0
+  exp1 = series.ewm(span=min(span1, len(series)), adjust=False).mean()
+  exp2 = series.ewm(span=min(span2, len(series)), adjust=False).mean()
   macd_line = exp1 - exp2
-  signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+  signal_line = macd_line.ewm(
+      span=min(signal, len(series)), adjust=False
+  ).mean()
   return (
       float(macd_line.iloc[-1]),
       float(signal_line.iloc[-1]),
@@ -322,7 +341,9 @@ def calc_vwap(df):
   if "volume" not in df.columns or df["volume"].sum() == 0:
     return float(df["close"].iloc[-1])
   typical_price = (df["high"] + df["low"] + df["close"]) / 3
-  vwap = (typical_price * df["volume"]).cumsum() / df["volume"].cumsum()
+  vwap = (typical_price * df["volume"]).cumsum() / (
+      df["volume"].cumsum() + 1e-9
+  )
   return float(vwap.iloc[-1])
 
 
@@ -331,17 +352,18 @@ def calc_obv(df):
     return "Neutralny"
   direction = np.sign(df["close"].diff()).fillna(0)
   obv = (direction * df["volume"]).cumsum()
-  if len(obv) > 5 and obv.iloc[-1] > obv.iloc[-5]:
+  if len(obv) > 3 and obv.iloc[-1] > obv.iloc[-3]:
     return "Akumulacja (Rosnący OBV)"
-  elif len(obv) > 5 and obv.iloc[-1] < obv.iloc[-5]:
+  elif len(obv) > 3 and obv.iloc[-1] < obv.iloc[-3]:
     return "Dystrybucja (Spadający OBV)"
   return "Brak wyraźnego trendu OBV"
 
 
 def calc_rvol(df, period=20):
-  if "volume" not in df.columns or df["volume"].sum() == 0 or len(df) < period:
+  if "volume" not in df.columns or df["volume"].sum() == 0 or len(df) < 2:
     return 1.0
-  vol_sma = df["volume"].rolling(window=period).mean()
+  p = min(period, len(df))
+  vol_sma = df["volume"].rolling(window=p).mean()
   avg_vol = float(vol_sma.iloc[-1])
   if avg_vol <= 0:
     return 1.0
@@ -360,9 +382,10 @@ def fetch_technical_analysis():
     symbol = item["symbol"]
     try:
       df_1h = get_candles_1h(item)
-      if df_1h.empty or len(df_1h) < 5:
+      if df_1h.empty or len(df_1h) < 3:
         continue
-      df_4h = resample_ohlc(df_1h, "4h")
+
+      df_4h = resample_ohlc(df_1h, "4h") if len(df_1h) >= 8 else df_1h.copy()
       df_1d = get_candles_1d(item)
 
       price = float(df_1h["close"].iloc[-1])
@@ -378,19 +401,19 @@ def fetch_technical_analysis():
       )
 
       log_returns = np.log(df_1h["close"] / df_1h["close"].shift(1)).dropna()
-      vol_1h = float(log_returns.std()) if len(log_returns) > 5 else 0.015
-      drift_1h = float(log_returns.mean()) if len(log_returns) > 5 else 0.0
+      vol_1h = float(log_returns.std()) if len(log_returns) > 3 else 0.015
+      drift_1h = float(log_returns.mean()) if len(log_returns) > 3 else 0.0
 
       rsi_1h = calc_rsi(df_1h["close"])
-      rsi_4h = calc_rsi(df_4h["close"]) if len(df_4h) >= 14 else 50.0
+      rsi_4h = calc_rsi(df_4h["close"]) if not df_4h.empty else 50.0
       rsi_1d = (
           calc_rsi(df_1d["close"])
-          if not df_1d.empty and len(df_1d) >= 14
+          if not df_1d.empty and len(df_1d) >= 5
           else rsi_4h
       )
 
       _, _, macd_hist = (
-          calc_macd(df_4h["close"]) if len(df_4h) >= 26 else (0.0, 0.0, 0.0)
+          calc_macd(df_4h["close"]) if not df_4h.empty else (0.0, 0.0, 0.0)
       )
       vwap_val = calc_vwap(df_4h) if len(df_4h) > 0 else price
       obv_status = calc_obv(df_4h)
@@ -498,11 +521,9 @@ def run_predictions(
   if df_ta.empty:
     return pd.DataFrame(), {}
 
-  # Poprawka: np.random.default_rng zamiast np.random.defaultrng
   rng = np.random.default_rng(
       seed=int(pd.Timestamp.now().strftime("%Y%m%d%H"))
   )
-
   monte_carlo_paths = {}
 
   def analyze_row(row):
@@ -652,7 +673,7 @@ def plot_price_forecast(symbol, current_price, price_paths):
 
 
 # ==========================================
-# SYSTEM AUTO-ŚLEDZENIA ZAGRAŃ (ZAPIS I ROZLICZANIE)
+# SYSTEM AUTO-ŚLEDZENIA ZAGRAŃ
 # ==========================================
 def auto_zapisz_sygnaly(df_ml, df_ta):
   if df_ml.empty:
