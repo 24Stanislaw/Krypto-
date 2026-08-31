@@ -298,7 +298,6 @@ def fetch_technical_analysis():
             atr = float(tr.rolling(min(14, len(df_4h))).mean().iloc[-1]) if len(tr) > 0 else price * 0.02
             ema200_4h = float(df_4h["close"].ewm(span=min(200, len(df_4h)), adjust=False).mean().iloc[-1]) if len(df_4h) > 0 else price
 
-            # [POPRRAWKA ANTY-FOMO] Szerszy i bezpieczniejszy SL (2.5 * ATR zamiast 2.0)
             sl = price - (2.5 * atr)
             support = float(df_4h["low"].min()) if len(df_4h) > 0 else price * 0.95
             resistance = float(df_4h["high"].max()) if len(df_4h) > 0 else price * 1.05
@@ -380,25 +379,31 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         ci_upper_10d = float(np.percentile(final_prices_paths[:, 239], 97.5))
         prob_up_10d = float(np.mean(final_prices_paths[:, 239] > price) * 100)
 
+        # [MODYFIKACJA] Stabilizator Smart Score (Wygładzenie i Capping)
         score = 50.0 
+        
+        # 1. Struktura trendu (stabilna baza)
         if "Silny Trend Wzrostowy" in regime: score += 25.0
-        elif "Korekta" in regime: score += 10.0
+        elif "Korekta" in regime: score += 12.0
         elif "Spadkowy" in regime: score -= 20.0
 
-        score += (rvol - 1.0) * 20.0  
+        # 2. RVOL z ograniczeniem (Clamping), aby pojedyncze piki nie psuły wyniku
+        rvol_capped = max(0.5, min(2.5, rvol)) 
+        score += (rvol_capped - 1.0) * 12.0  
+
+        # 3. OBV z zachowaniem kierunku
         if "Akumulacja" in obv_status: score += 12.0
         elif "Dystrybucja" in obv_status: score -= 15.0
 
-        if rsi_4h < 45: score += (45 - rsi_4h) * 0.4
-        elif rsi_4h > 65: score -= (rsi_4h - 65) * 0.6
+        # 4. RSI 4H z łagodniejszą krzywą karania/nagradzania
+        if rsi_4h < 40: score += (40 - rsi_4h) * 0.3
+        elif rsi_4h > 70: score -= (rsi_4h - 70) * 0.5
 
         score = max(0.0, min(100.0, score))
 
         is_altcoin = symbol not in ["BTC", "ETH"]
         macro_headwind = btc_dom > 59.0 and is_altcoin
 
-        # [POPRRAWKA ANTY-FOMO] Dodatkowy filtr: odrzucamy, jeśli RSI 1H jest przegrzane (>65) 
-        # lub cena jest tuż przy oporze (brak miejsca na wzrost, ryzyko korekty).
         is_overextended = (rsi_1h > 65.0) or (price >= resistance * 0.99)
 
         if macro_headwind: 
@@ -482,7 +487,7 @@ def auto_zapisz_sygnaly(df_ml, df_ta):
             atr = float(df_ta[df_ta["Token"] == token].iloc[0]["ATR_Raw"])
             
             cel_tp = cena_we * 1.06
-            sl = cena_we - (2.5 * atr)  # Spójne z poprawką SL
+            sl = cena_we - (2.5 * atr)
 
             nowe_wiersze.append({
                 "Data Wejścia": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
