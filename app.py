@@ -521,9 +521,9 @@ def run_predictions(
   if df_ta.empty:
     return pd.DataFrame(), {}
 
-  rng = np.random.defaultrng(
-      seed=int(pd.Timestamp.now().strftime("%Y%m%d%H"))
-  )
+  # POPRAWKA: Bezpieczne przekazanie ziarna (seed) jako int do default_rng
+  seed_val = int(pd.Timestamp.now().strftime("%Y%m%d"))
+  rng = np.random.default_rng(seed=seed_val)
   monte_carlo_paths = {}
 
   def analyze_row(row):
