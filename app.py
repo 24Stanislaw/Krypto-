@@ -450,7 +450,10 @@ def auto_zapisz_sygnaly(df_ml, df_ta):
     kolumny = ["Data Wejścia", "Token", "Typ Sygnału", "Cena Wejścia ($)", "Cel TP (6%) ($)", "SL ($)", "Ekstremum ($)", "Data Wyjścia", "Status", "Zysk (%)"]
     
     if os.path.exists(HISTORY_FILE):
-        df_hist = pd.read_csv(HISTORY_FILE)
+        try:
+            df_hist = pd.read_csv(HISTORY_FILE)
+        except Exception:
+            df_hist = pd.DataFrame(columns=kolumny)
     else:
         df_hist = pd.DataFrame(columns=kolumny)
 
@@ -488,8 +491,10 @@ def auto_zapisz_sygnaly(df_ml, df_ta):
 
 def aktualizuj_i_rozlicz_pozycje(df_ta):
     if not os.path.exists(HISTORY_FILE): return
-    try: df_hist = pd.read_csv(HISTORY_FILE)
-    except: return
+    try: 
+        df_hist = pd.read_csv(HISTORY_FILE)
+    except Exception: 
+        return
     if df_hist.empty: return
 
     now_dt = pd.Timestamp.now()
@@ -746,43 +751,56 @@ with tab2:
 
 with tab3:
     if os.path.exists(HISTORY_FILE):
-        df_hist = pd.read_csv(HISTORY_FILE)
-        df_active = df_hist[df_hist["Status"].str.contains("W toku", na=False)]
-        if not df_active.empty: 
-            st.dataframe(apply_high_contrast_striping(df_active.sort_values("Data Wejścia", ascending=False)), use_container_width=True)
-        else: st.info("Brak aktywnych pozycji (żaden token nie spełnia obecnie warunków zakupu).")
-    else: st.info("Brak danych w bazie.")
+        try:
+            df_hist = pd.read_csv(HISTORY_FILE)
+            df_active = df_hist[df_hist["Status"].str.contains("W toku", na=False)]
+            if not df_active.empty: 
+                st.dataframe(apply_high_contrast_striping(df_active.sort_values("Data Wejścia", ascending=False)), use_container_width=True)
+            else: 
+                st.info("Brak aktywnych pozycji (żaden token nie spełnia obecnie warunków zakupu).")
+        except Exception:
+            st.info("Brak aktywnych pozycji.")
+    else: 
+        st.info("Brak danych w bazie.")
 
 with tab4:
     if os.path.exists(HISTORY_FILE):
-        df_hist = pd.read_csv(HISTORY_FILE)
-        df_closed = df_hist[~df_hist["Status"].str.contains("W toku", na=False)]
-        if not df_closed.empty: 
-            st.dataframe(apply_high_contrast_striping(df_closed.sort_values("Data Wyjścia", ascending=False)), use_container_width=True)
-        else: st.info("Algorytm nie zamknął jeszcze żadnej transakcji (żadna cena nie dotarła do TP, SL ani nie minęło 10 dni).")
-    else: st.info("Brak zamkniętych.")
+        try:
+            df_hist = pd.read_csv(HISTORY_FILE)
+            df_closed = df_hist[~df_hist["Status"].str.contains("W toku", na=False)]
+            if not df_closed.empty: 
+                st.dataframe(apply_high_contrast_striping(df_closed.sort_values("Data Wyjścia", ascending=False)), use_container_width=True)
+            else: 
+                st.info("Algorytm nie zamknął jeszcze żadnej transakcji (żadna cena nie dotarła do TP, SL ani nie minęło 10 dni).")
+        except Exception:
+            st.info("Brak zamkniętych pozycji.")
+    else: 
+        st.info("Brak zamkniętych.")
 
 with tab5:
     if os.path.exists(HISTORY_FILE):
-        df_hist = pd.read_csv(HISTORY_FILE)
-        df_closed = df_hist[~df_hist["Status"].str.contains("W toku", na=False)]
-        
-        if not df_closed.empty:
-            sukcesy = len(df_closed[df_closed["Status"].str.contains("✅", na=False)])
-            wszystkie = len(df_closed)
-            win_rate = (sukcesy / wszystkie) * 100
-            sredni_zysk = df_closed["Zysk (%)"].mean()
+        try:
+            df_hist = pd.read_csv(HISTORY_FILE)
+            df_closed = df_hist[~df_hist["Status"].str.contains("W toku", na=False)]
             
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Zakończone Sygnały", wszystkie)
-            k2.metric("Osiągnięty TP (Sukces)", sukcesy)
-            k3.metric("Skuteczność (Win Rate)", f"{win_rate:.1f}%")
-            k4.metric("Średni Zysk/Strata z pozycji", f"{sredni_zysk:.2f}%")
-            
-            st.markdown("### Dystrybucja zysków/strat po zamknięciu")
-            st.bar_chart(df_closed.set_index("Token")["Zysk (%)"])
-        else:
-            st.info("Algorytm zbiera dane... Musisz poczekać na pierwsze zamknięcia pozycji (TP, SL lub limit 10 dni), aby policzyć skuteczność.")
+            if not df_closed.empty:
+                sukcesy = len(df_closed[df_closed["Status"].str.contains("✅", na=False)])
+                wszystkie = len(df_closed)
+                win_rate = (sukcesy / wszystkie) * 100
+                sredni_zysk = df_closed["Zysk (%)"].mean()
+                
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("Zakończone Sygnały", wszystkie)
+                k2.metric("Osiągnięty TP (Sukces)", sukcesy)
+                k3.metric("Skuteczność (Win Rate)", f"{win_rate:.1f}%")
+                k4.metric("Średni Zysk/Strata z pozycji", f"{sredni_zysk:.2f}%")
+                
+                st.markdown("### Dystrybucja zysków/strat po zamknięciu")
+                st.bar_chart(df_closed.set_index("Token")["Zysk (%)"])
+            else:
+                st.info("Algorytm zbiera dane... Musisz poczekać na pierwsze zamknięcia pozycji (TP, SL lub limit 10 dni), aby policzyć skuteczność.")
+        except Exception:
+            st.info("Brak opublikowanych zamkniętych pozycji.")
     else:
         st.info("Brak pliku z historią.")
 
