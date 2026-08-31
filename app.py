@@ -113,7 +113,7 @@ with st.sidebar:
   )
 
 # ==========================================
-# LISTA TOKENÓW SPOT (COINBASE / GECKO)
+# LISTA TOKENÓW SPOT (Z POPRAWIONYM JUP)
 # ==========================================
 TOKENS = [
     {"symbol": "ONDO", "coinbase": "ONDO-USD", "gecko_id": "ondo-finance"},
@@ -131,7 +131,8 @@ TOKENS = [
     {"symbol": "PENDLE", "coinbase": "PENDLE-USD", "gecko_id": "pendle"},
     {"symbol": "NEAR", "coinbase": "NEAR-USD", "gecko_id": "near"},
     {"symbol": "PLUME", "coinbase": "PLUME-USD", "gecko_id": "plume"},
-    {"symbol": "JUP", "coinbase": "JUP-USD", "gecko_id": "jupiter-exchange-solana"},
+    # Poprawka: JUP pobierany wyłącznie z CoinGecko (omijamy stary token ERC-20 na Coinbase)
+    {"symbol": "JUP", "coinbase": None, "gecko_id": "jupiter-exchange-solana"},
     {"symbol": "UNI", "coinbase": "UNI-USD", "gecko_id": "uniswap"},
     {"symbol": "SEI", "coinbase": "SEI-USD", "gecko_id": "sei-network"},
     {"symbol": "SOL", "coinbase": "SOL-USD", "gecko_id": "solana"},
@@ -496,7 +497,7 @@ def run_predictions(
 ):
   if df_ta.empty:
     return pd.DataFrame(), {}
-  rng = np.random.default_rng(seed=int(pd.Timestamp.now().strftime("%Y%m%d%H")))
+  rng = np.random.defaultrng(seed=int(pd.Timestamp.now().strftime("%Y%m%d%H")))
 
   monte_carlo_paths = {}
 
