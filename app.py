@@ -113,7 +113,7 @@ with st.sidebar:
   )
 
 # ==========================================
-# LISTA TOKENÓW SPOT (POPRAWIONY JUP)
+# LISTA TOKENÓW SPOT (ZAKTUALIZOWANY JUP)
 # ==========================================
 TOKENS = [
     {"symbol": "ONDO", "coinbase": "ONDO-USD", "gecko_id": "ondo-finance"},
@@ -131,7 +131,7 @@ TOKENS = [
     {"symbol": "PENDLE", "coinbase": "PENDLE-USD", "gecko_id": "pendle"},
     {"symbol": "NEAR", "coinbase": "NEAR-USD", "gecko_id": "near"},
     {"symbol": "PLUME", "coinbase": "PLUME-USD", "gecko_id": "plume"},
-    {"symbol": "JUP", "coinbase": None, "gecko_id": "jupiter"},
+    {"symbol": "JUP", "coinbase": "JUP-USD", "gecko_id": "jupiter"},
     {"symbol": "UNI", "coinbase": "UNI-USD", "gecko_id": "uniswap"},
     {"symbol": "SEI", "coinbase": "SEI-USD", "gecko_id": "sei-network"},
     {"symbol": "SOL", "coinbase": "SOL-USD", "gecko_id": "solana"},
@@ -521,7 +521,6 @@ def run_predictions(
   if df_ta.empty:
     return pd.DataFrame(), {}
 
-  # POPRAWKA: Bezpieczne przekazanie ziarna (seed) jako int do default_rng
   seed_val = int(pd.Timestamp.now().strftime("%Y%m%d"))
   rng = np.random.default_rng(seed=seed_val)
   monte_carlo_paths = {}
