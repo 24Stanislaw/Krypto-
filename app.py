@@ -343,7 +343,7 @@ def fetch_technical_analysis():
     return pd.DataFrame(data), fng_val, fng_class, btc_dom, alt_season, loaded_count, len(TOKENS)
 
 # ==========================================
-# SCORING I PREDYKCJE (MONTE CARLO 10 DNI)
+# SCORING I PREDYKCJE (MONTE CARLO 10 DNI Z TŁUMIENIEM DRIFTU)
 # ==========================================
 def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumulation):
     if df_ta.empty: return pd.DataFrame(), {}
@@ -363,10 +363,15 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         rvol = float(row.get("RVOL_Raw", 1.0))
         resistance = float(row.get("Resistance_Raw", price * 1.05))
 
-        # Symulacja 10 dni (240 godzin)
-        adjusted_drift = drift_1h - (0.5 * (vol_1h**2))
-        shocks = rng.normal(loc=adjusted_drift, scale=vol_1h, size=(5000, 240))
-        cum_returns = np.exp(np.cumsum(shocks, axis=1))
+        # [POPRAWKA] Tłumienie driftu (Drift Decay / Mean Reversion) zapobiegające nierealistycznym eskalacjom na 10D
+        safe_drift = max(-0.001, min(0.001, drift_1h))
+        time_steps = np.arange(1, 241)
+        decay_factors = np.exp(-0.02 * (time_steps - 1))
+        drift_matrix = safe_drift * decay_factors.reshape(1, -1)
+        
+        shocks = rng.normal(loc=0.0, scale=vol_1h, size=(5000, 240))
+        step_returns = drift_matrix + shocks
+        cum_returns = np.exp(np.cumsum(step_returns, axis=1))
         final_prices_paths = price * cum_returns
         
         monte_carlo_paths[symbol] = final_prices_paths
@@ -379,23 +384,18 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         ci_upper_10d = float(np.percentile(final_prices_paths[:, 239], 97.5))
         prob_up_10d = float(np.mean(final_prices_paths[:, 239] > price) * 100)
 
-        # [MODYFIKACJA] Stabilizator Smart Score (Wygładzenie i Capping)
+        # Smart Score (wygładzony i stabilizowany)
         score = 50.0 
-        
-        # 1. Struktura trendu (stabilna baza)
         if "Silny Trend Wzrostowy" in regime: score += 25.0
         elif "Korekta" in regime: score += 12.0
         elif "Spadkowy" in regime: score -= 20.0
 
-        # 2. RVOL z ograniczeniem (Clamping), aby pojedyncze piki nie psuły wyniku
         rvol_capped = max(0.5, min(2.5, rvol)) 
         score += (rvol_capped - 1.0) * 12.0  
 
-        # 3. OBV z zachowaniem kierunku
         if "Akumulacja" in obv_status: score += 12.0
         elif "Dystrybucja" in obv_status: score -= 15.0
 
-        # 4. RSI 4H z łagodniejszą krzywą karania/nagradzania
         if rsi_4h < 40: score += (40 - rsi_4h) * 0.3
         elif rsi_4h > 70: score -= (rsi_4h - 70) * 0.5
 
@@ -403,7 +403,6 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
 
         is_altcoin = symbol not in ["BTC", "ETH"]
         macro_headwind = btc_dom > 59.0 and is_altcoin
-
         is_overextended = (rsi_1h > 65.0) or (price >= resistance * 0.99)
 
         if macro_headwind: 
