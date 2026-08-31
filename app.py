@@ -497,7 +497,11 @@ def run_predictions(
 ):
   if df_ta.empty:
     return pd.DataFrame(), {}
-  rng = np.random.defaultrng(seed=int(pd.Timestamp.now().strftime("%Y%m%d%H")))
+
+  # Poprawka: np.random.default_rng zamiast np.random.defaultrng
+  rng = np.random.default_rng(
+      seed=int(pd.Timestamp.now().strftime("%Y%m%d%H"))
+  )
 
   monte_carlo_paths = {}
 
