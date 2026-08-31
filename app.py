@@ -113,7 +113,7 @@ with st.sidebar:
   )
 
 # ==========================================
-# LISTA TOKENÓW SPOT
+# LISTA TOKENÓW SPOT (POPRAWIONY JUP)
 # ==========================================
 TOKENS = [
     {"symbol": "ONDO", "coinbase": "ONDO-USD", "gecko_id": "ondo-finance"},
@@ -131,7 +131,7 @@ TOKENS = [
     {"symbol": "PENDLE", "coinbase": "PENDLE-USD", "gecko_id": "pendle"},
     {"symbol": "NEAR", "coinbase": "NEAR-USD", "gecko_id": "near"},
     {"symbol": "PLUME", "coinbase": "PLUME-USD", "gecko_id": "plume"},
-    {"symbol": "JUP", "coinbase": None, "gecko_id": "jupiter-exchange-solana"},
+    {"symbol": "JUP", "coinbase": None, "gecko_id": "jupiter"},
     {"symbol": "UNI", "coinbase": "UNI-USD", "gecko_id": "uniswap"},
     {"symbol": "SEI", "coinbase": "SEI-USD", "gecko_id": "sei-network"},
     {"symbol": "SOL", "coinbase": "SOL-USD", "gecko_id": "solana"},
@@ -272,7 +272,7 @@ def get_candles_1h(token_info):
   if token_info.get("coinbase"):
     try:
       df = fetch_from_coinbase(token_info["coinbase"], granularity=3600)
-      if not df.empty and len(df) >= 5:
+      if not df.empty and len(df) >= 3:
         return df
     except Exception:
       pass
@@ -286,7 +286,7 @@ def get_candles_1d(token_info):
   if token_info.get("coinbase"):
     try:
       df = fetch_from_coinbase(token_info["coinbase"], granularity=86400)
-      if not df.empty and len(df) >= 5:
+      if not df.empty and len(df) >= 3:
         return df
     except Exception:
       pass
@@ -322,7 +322,7 @@ def calc_rsi(series, period=14):
 
 
 def calc_macd(series, span1=12, span2=26, signal=9):
-  if len(series) < 5:
+  if len(series) < 3:
     return 0.0, 0.0, 0.0
   exp1 = series.ewm(span=min(span1, len(series)), adjust=False).mean()
   exp2 = series.ewm(span=min(span2, len(series)), adjust=False).mean()
@@ -352,9 +352,9 @@ def calc_obv(df):
     return "Neutralny"
   direction = np.sign(df["close"].diff()).fillna(0)
   obv = (direction * df["volume"]).cumsum()
-  if len(obv) > 3 and obv.iloc[-1] > obv.iloc[-3]:
+  if len(obv) > 2 and obv.iloc[-1] > obv.iloc[-2]:
     return "Akumulacja (Rosnący OBV)"
-  elif len(obv) > 3 and obv.iloc[-1] < obv.iloc[-3]:
+  elif len(obv) > 2 and obv.iloc[-1] < obv.iloc[-2]:
     return "Dystrybucja (Spadający OBV)"
   return "Brak wyraźnego trendu OBV"
 
@@ -382,10 +382,10 @@ def fetch_technical_analysis():
     symbol = item["symbol"]
     try:
       df_1h = get_candles_1h(item)
-      if df_1h.empty or len(df_1h) < 3:
+      if df_1h.empty or len(df_1h) < 2:
         continue
 
-      df_4h = resample_ohlc(df_1h, "4h") if len(df_1h) >= 8 else df_1h.copy()
+      df_4h = resample_ohlc(df_1h, "4h") if len(df_1h) >= 4 else df_1h.copy()
       df_1d = get_candles_1d(item)
 
       price = float(df_1h["close"].iloc[-1])
@@ -401,14 +401,14 @@ def fetch_technical_analysis():
       )
 
       log_returns = np.log(df_1h["close"] / df_1h["close"].shift(1)).dropna()
-      vol_1h = float(log_returns.std()) if len(log_returns) > 3 else 0.015
-      drift_1h = float(log_returns.mean()) if len(log_returns) > 3 else 0.0
+      vol_1h = float(log_returns.std()) if len(log_returns) > 2 else 0.015
+      drift_1h = float(log_returns.mean()) if len(log_returns) > 2 else 0.0
 
       rsi_1h = calc_rsi(df_1h["close"])
       rsi_4h = calc_rsi(df_4h["close"]) if not df_4h.empty else 50.0
       rsi_1d = (
           calc_rsi(df_1d["close"])
-          if not df_1d.empty and len(df_1d) >= 5
+          if not df_1d.empty and len(df_1d) >= 2
           else rsi_4h
       )
 
@@ -521,7 +521,7 @@ def run_predictions(
   if df_ta.empty:
     return pd.DataFrame(), {}
 
-  rng = np.random.default_rng(
+  rng = np.random.defaultrng(
       seed=int(pd.Timestamp.now().strftime("%Y%m%d%H"))
   )
   monte_carlo_paths = {}
