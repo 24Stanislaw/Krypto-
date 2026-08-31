@@ -99,7 +99,7 @@ with st.sidebar:
     )
 
 # ==========================================
-# LISTA TOKENÓW SPOT (COINBASE)
+# LISTA TOKENÓW SPOT (COINBASE / GECKO)
 # ==========================================
 TOKENS = [
     {"symbol": "ONDO", "coinbase": "ONDO-USD", "gecko_id": "ondo-finance"},
@@ -113,7 +113,7 @@ TOKENS = [
     {"symbol": "PENDLE", "coinbase": "PENDLE-USD", "gecko_id": "pendle"},
     {"symbol": "NEAR", "coinbase": "NEAR-USD", "gecko_id": "near"},
     {"symbol": "PLUME", "coinbase": "PLUME-USD", "gecko_id": "plume"},
-    {"symbol": "JUP", "coinbase": "JUP-USD", "gecko_id": "jupiter-exchange-solana"},
+    {"symbol": "JUP", "coinbase": None, "gecko_id": "jupiter-exchange-solana"},
     {"symbol": "UNI", "coinbase": "UNI-USD", "gecko_id": "uniswap"},
     {"symbol": "SEI", "coinbase": "SEI-USD", "gecko_id": "sei-network"},
     {"symbol": "KTA", "coinbase": "KTA-USD", "gecko_id": "keeta"},
@@ -313,6 +313,7 @@ def fetch_technical_analysis():
             else: regime = "Strukturalny Trend Spadkowy"
 
             data.append({
+                "Lp.": loaded_count + 1,
                 "Token": symbol, "Cena ($)": fmt(price), "24h (%)": round(change_24h, 2), "Reżim Rynkowy": regime,
                 "RSI 1H": round(rsi_1h, 1), "RSI 4H": round(rsi_4h, 1), "RSI 1D": round(rsi_1d, 1),
                 "RVOL (4H)": f"{rvol_val}x", "VWAP (4H)": fmt(vwap_val), "OBV Status": obv_status,
@@ -329,6 +330,7 @@ def fetch_technical_analysis():
         except Exception:
             p, chg = get_simple_coingecko_price(gecko_id)
             data.append({
+                "Lp.": loaded_count + 1,
                 "Token": symbol, "Cena ($)": fmt(p), "24h (%)": round(chg, 2), "Reżim Rynkowy": "Brak danych / Konsolidacja",
                 "RSI 1H": 50.0, "RSI 4H": 50.0, "RSI 1D": 50.0, "RVOL (4H)": "1.0x", "VWAP (4H)": fmt(p),
                 "OBV Status": "Neutralny", "MACD Hist (4H)": "0.0", "EMA 200 (4H)": fmt(p), "SL (ATR)": fmt(p * 0.96),
@@ -468,7 +470,6 @@ def auto_zapisz_sygnaly(df_ml, df_ta):
             cena_we = float(df_ta[df_ta["Token"] == token].iloc[0]["Price_Raw"])
             atr = float(df_ta[df_ta["Token"] == token].iloc[0]["ATR_Raw"])
             
-            # Cel ustawiony sztywno na +6% zysku od ceny wejścia
             cel_tp = cena_we * 1.06
             sl = cena_we - (2 * atr)
 
@@ -510,7 +511,6 @@ def aktualizuj_i_rozlicz_pozycje(df_ta):
         curr_price = float(price_map[token])
         entry = float(row["Cena Wejścia ($)"])
         
-        # Pobranie celu TP (6%) z nagłówka lub wyliczenie z ceny wejścia
         cel_tp = float(row.get("Cel TP (6%) ($)", row.get("Cel 7D ($)", entry * 1.06)))
         sl = float(row["SL ($)"])
 
@@ -527,7 +527,6 @@ def aktualizuj_i_rozlicz_pozycje(df_ta):
         status = row["Status"]
         data_wy = row["Data Wyjścia"]
 
-        # Warunki wyjścia: Cel 6% LUB upływ 10 dni
         if curr_price >= cel_tp:
             status = "✅ SUKCES (TP +6%)"
             data_wy = now_str
@@ -577,9 +576,8 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     zasieg_mc_10d = row_ml.get("Zasięg MC 10D (95%)", "-") if row_ml is not None else "-"
     prob_up_10d = row_ml.get("Szansa Wzrostu (10D)", "-") if row_ml is not None else "-"
     
-    target_tp1 = price_raw * 1.06 # Wymuszone +6%
+    target_tp1 = price_raw * 1.06
 
-    # --- 1. DYNAMICZNA INTERPRETACJA STRUKTURY ---
     if "Silny Trend" in regime: 
         pa_desc = f"Aktywo znajduje się w wyraźnym trendzie wzrostowym, notując cenę powyżej kluczowej, 200-okresowej średniej kroczącej (EMA200: `{fmt(ema_raw)} $`). Świadczy to o długoterminowej kontroli popytu i stanowi solidne tło do rozgrywania pozycji długich."
     elif "Korekta" in regime: 
@@ -591,7 +589,6 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
 
     btc_dom_desc = f"Wskaźnik dominacji Bitcoina (obecnie na poziomie `{btc_dom}%`) określa, jaka część kapitału kryptowalutowego znajduje się w BTC. " + ("Obecny wysoki poziom wysysa płynność z altcoinów, utrudniając im niezależne wzrosty." if btc_dom > 59.0 else "Obecny umiarkowany/spadkowy trend dominacji sprzyja rotacji kapitału, stwarzając dobre środowisko dla ruchów na altcoinach.")
 
-    # --- 2. DYNAMICZNA INTERPRETACJA WOLUMENU I SMART MONEY ---
     rvol_float = float(rvol_str.replace("x", "")) if "x" in rvol_str else 1.0
     if rvol_float >= 1.5:
         rvol_desc = f"**RVOL (Względny Wolumen):** Wskaźnik wynosi `{rvol_str}`. Znacznie podwyższony wolumen sugeruje ponadprzeciętne zaangażowanie kapitału (ślad tzw. Smart Money), co uwiarygadnia siłę obecnego ruchu cenowego."
@@ -603,11 +600,9 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     vwap_desc = f"**VWAP (Cena Ważona Wolumenem):** Wynosi `{fmt(vwap_val)} $`. Jest to średnia cena akceptowana przez większość kapitału w danej sesji. Cena bieżąca znajdująca się {'powyżej' if price_raw > vwap_val else 'poniżej'} VWAP wskazuje na śróddzienną przewagę {'kupujących' if price_raw > vwap_val else 'sprzedających'}."
     obv_desc = f"**OBV (Skumulowany Wolumen):** Odczyt to `{obv_status}`. Wskaźnik On-Balance Volume śledzi, czy kapitał wpływa do aktywa, czy z niego ucieka. Obecny stan sugeruje {'systematyczne skupywanie waloru (akumulację)' if 'Akumulacja' in obv_status else 'realizację zysków przez duże portfele (dystrybucję)' if 'Dystrybucja' in obv_status else 'równowagę sił bez widocznej akumulacji'}."
 
-    # --- 3. DYNAMICZNA INTERPRETACJA WSKAŹNIKÓW PĘDU ---
     rsi_desc = f"**RSI (Wskaźnik Siły Względnej):** Zestawienie wieloramowe (1H: `{round(rsi_1h, 1)}` | 4H: `{round(rsi_4h, 1)}` | 1D: `{round(rsi_1d, 1)}`). RSI określa potencjalne wyczerpanie pędu ceny. Rynek krótkoterminowo (1H-4H) wydaje się być {'przegrzany (ryzyko korekty)' if rsi_4h > 65 else 'wyprzedany (przestrzeń do odbicia)' if rsi_4h < 40 else 'w neutralnej strefie równowagi'}."
     macd_desc = f"**MACD Histogram (4H):** Wynosi `{fmt(macd_hist)}`. Histogram obrazuje różnicę między krótko- i długoterminowym pędem. Wartość {'dodatnia potwierdza narastające momentum prowzrostowe' if macd_hist > 0 else 'ujemna ostrzega o przewadze impetu spadkowego'}. Zmiana kierunku histogramu to często najwcześniejszy sygnał obrotu."
 
-    # --- 4. WNIOSKI Z REKOMENDACJĄ ---
     if "WYSOKI EDGE" in edge_status: 
         final_reco = "🟢 **REKOMENDACJA:** Zdecydowane zezwolenie na handel. Aktywo spełnia rygorystyczne kryteria algorytmu, łącząc asymetryczny potencjał zysku do ryzyka z solidnym wsparciem wskaźników płynności (Smart Money)."
     elif "NEUTRALNY" in edge_status: 
@@ -615,7 +610,6 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     else: 
         final_reco = "❌ **REKOMENDACJA:** Odrzucenie sygnału. Kondycja techniczna faworyzuje stronę podażową. Ryzyko spadków lub uwięzienia kapitału w przedłużającej się konsolidacji jest zbyt wysokie."
 
-    # --- 5. FORMATOWANIE ZWROTNE W MARKDOWN ---
     return f"""
 ### 🎯 EKSPERCKA SYNTEZA MTF PRO: {symbol}
 **Werdykt:** `{edge_status}` | **Smart Score:** **{smart_score}%** | **Cena wejścia:** `{fmt(price_raw)} $`
@@ -662,7 +656,6 @@ with st.spinner("🔄 Pobieram dane na żywo z API i przeliczam wskaźniki..."):
     df_ta, fng_val, fng_class, btc_dom, alt_season, loaded_c, total_c = fetch_technical_analysis()
     df_ml, mc_paths = run_predictions(df_ta, btc_dom, min_smart_score, max_rsi_4h, wymagaj_akumulacji)
     
-    # Automatyczne śledzenie i rozliczanie
     auto_zapisz_sygnaly(df_ml, df_ta)
     aktualizuj_i_rozlicz_pozycje(df_ta)
 
@@ -675,7 +668,6 @@ col_f.metric("Fear & Greed", f"{fng_val}/100", fng_class)
 
 st.markdown("---")
 
-# SEKCJA OKAZJI
 st.markdown("### 🔥 Najlepsze Okazje Zakupowe")
 if not df_ml.empty:
     okazje_df = df_ml[df_ml["Ocena Przewagi (Edge)"].str.contains("WYSOKI EDGE", na=False)]
@@ -700,6 +692,7 @@ if "Atrakcyjność (%)" not in df_ta_clean.columns and not df_ml.empty: df_ta_cl
 df_ml_widok = df_ml.drop(columns=["Prognoza_10D_Raw"], errors="ignore") if not df_ml.empty else df_ml
 
 config_tabel = {
+    "Lp.": st.column_config.NumberColumn("Lp.", format="%d"),
     "Atrakcyjność (%)": st.column_config.NumberColumn("Atrakcyjność (%)", format="%.2f"),
     "Smart Score (%)": st.column_config.NumberColumn("Smart Score (%)", format="%.2f"),
     "24h (%)": st.column_config.NumberColumn("24h (%)", format="%.2f"),
@@ -717,9 +710,9 @@ def apply_high_contrast_striping(df):
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["1. Reżimy", "2. Ocena Przewagi", "3. ⚡ Aktywne Pozycje", "4. 🗂️ Archiwum", "5. 📈 Skuteczność Algorytmu"])
 
 with tab1: 
-    st.dataframe(apply_high_contrast_striping(df_ta_clean), column_config=config_tabel, use_container_width=True)
+    st.dataframe(apply_high_contrast_striping(df_ta_clean), column_config=config_tabel, use_container_width=True, hide_index=True)
 with tab2:
-    st.dataframe(apply_high_contrast_striping(df_ml_widok), column_config=config_tabel, use_container_width=True)
+    st.dataframe(apply_high_contrast_striping(df_ml_widok), column_config=config_tabel, use_container_width=True, hide_index=True)
     st.markdown("---")
     st.subheader("➕ Śledź wybraną pozycję ręcznie")
     col_sel_tok, col_sel_btn = st.columns([2, 1])
@@ -728,7 +721,7 @@ with tab2:
     if col_sel_btn.button("🚀 Dodaj do śledzenia", type="primary"):
         cena_we = float(df_ta[df_ta["Token"] == chosen_token].iloc[0]["Price_Raw"])
         atr = float(df_ta[df_ta["Token"] == chosen_token].iloc[0]["ATR_Raw"])
-        cel_tp = cena_we * 1.06 # Sztywny cel 6%
+        cel_tp = cena_we * 1.06
         sl = cena_we - (2 * atr)
         
         nowa = pd.DataFrame([{
@@ -755,7 +748,7 @@ with tab3:
             df_hist = pd.read_csv(HISTORY_FILE)
             df_active = df_hist[df_hist["Status"].str.contains("W toku", na=False)]
             if not df_active.empty: 
-                st.dataframe(apply_high_contrast_striping(df_active.sort_values("Data Wejścia", ascending=False)), use_container_width=True)
+                st.dataframe(apply_high_contrast_striping(df_active.sort_values("Data Wejścia", ascending=False)), use_container_width=True, hide_index=True)
             else: 
                 st.info("Brak aktywnych pozycji (żaden token nie spełnia obecnie warunków zakupu).")
         except Exception:
@@ -769,7 +762,7 @@ with tab4:
             df_hist = pd.read_csv(HISTORY_FILE)
             df_closed = df_hist[~df_hist["Status"].str.contains("W toku", na=False)]
             if not df_closed.empty: 
-                st.dataframe(apply_high_contrast_striping(df_closed.sort_values("Data Wyjścia", ascending=False)), use_container_width=True)
+                st.dataframe(apply_high_contrast_striping(df_closed.sort_values("Data Wyjścia", ascending=False)), use_container_width=True, hide_index=True)
             else: 
                 st.info("Algorytm nie zamknął jeszcze żadnej transakcji (żadna cena nie dotarła do TP, SL ani nie minęło 10 dni).")
         except Exception:
