@@ -113,7 +113,7 @@ with st.sidebar:
   )
 
 # ==========================================
-# LISTA TOKENÓW SPOT (ZAKTUALIZOWANY JUP)
+# LISTA TOKENÓW SPOT (Z DODANYM API BINANCE DLA JUP)
 # ==========================================
 TOKENS = [
     {"symbol": "ONDO", "coinbase": "ONDO-USD", "gecko_id": "ondo-finance"},
@@ -131,7 +131,7 @@ TOKENS = [
     {"symbol": "PENDLE", "coinbase": "PENDLE-USD", "gecko_id": "pendle"},
     {"symbol": "NEAR", "coinbase": "NEAR-USD", "gecko_id": "near"},
     {"symbol": "PLUME", "coinbase": "PLUME-USD", "gecko_id": "plume"},
-    {"symbol": "JUP", "gecko_id": "jupiter-ag"},
+    {"symbol": "JUP", "binance": "JUPUSDT", "gecko_id": "jupiter-ag"},
     {"symbol": "UNI", "coinbase": "UNI-USD", "gecko_id": "uniswap"},
     {"symbol": "SEI", "coinbase": "SEI-USD", "gecko_id": "sei-network"},
     {"symbol": "SOL", "coinbase": "SOL-USD", "gecko_id": "solana"},
@@ -230,6 +230,37 @@ def calculate_altcoin_season_index():
     return 45
 
 
+def fetch_from_binance(symbol_pair, interval="1h"):
+  url = f"https://api.binance.com/api/v3/klines?symbol={symbol_pair}&interval={interval}&limit=500"
+  res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+  res.raise_for_status()
+  data = res.json()
+  df = pd.DataFrame(
+      data,
+      columns=[
+          "timestamp",
+          "open",
+          "high",
+          "low",
+          "close",
+          "volume",
+          "close_time",
+          "q_vol",
+          "trades",
+          "tb_base_vol",
+          "tb_quote_vol",
+          "ignore",
+      ],
+  )
+  df["open"] = df["open"].astype(float)
+  df["high"] = df["high"].astype(float)
+  df["low"] = df["low"].astype(float)
+  df["close"] = df["close"].astype(float)
+  df["volume"] = df["volume"].astype(float)
+  df["dt"] = pd.to_datetime(df["timestamp"], unit="ms")
+  return df.sort_values("dt").reset_index(drop=True)
+
+
 def fetch_from_coinbase(symbol_pair, granularity=3600):
   url = f"https://api.exchange.coinbase.com/products/{symbol_pair}/candles?granularity={granularity}"
   res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=4)
@@ -269,6 +300,13 @@ def fetch_from_coingecko(gecko_id):
 
 
 def get_candles_1h(token_info):
+  if token_info.get("binance"):
+    try:
+      df = fetch_from_binance(token_info["binance"], interval="1h")
+      if not df.empty and len(df) >= 3:
+        return df
+    except Exception:
+      pass
   if token_info.get("coinbase"):
     try:
       df = fetch_from_coinbase(token_info["coinbase"], granularity=3600)
@@ -276,13 +314,22 @@ def get_candles_1h(token_info):
         return df
     except Exception:
       pass
-  try:
-    return fetch_from_coingecko(token_info["gecko_id"])
-  except Exception:
-    return pd.DataFrame()
+  if token_info.get("gecko_id"):
+    try:
+      return fetch_from_coingecko(token_info["gecko_id"])
+    except Exception:
+      pass
+  return pd.DataFrame()
 
 
 def get_candles_1d(token_info):
+  if token_info.get("binance"):
+    try:
+      df = fetch_from_binance(token_info["binance"], interval="1d")
+      if not df.empty and len(df) >= 3:
+        return df
+    except Exception:
+      pass
   if token_info.get("coinbase"):
     try:
       df = fetch_from_coinbase(token_info["coinbase"], granularity=86400)
