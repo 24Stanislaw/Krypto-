@@ -105,24 +105,23 @@ with st.sidebar:
     )
 
 # ==========================================
-# LISTA TOKENÓW SPOT (BYBIT / GECKO)
+# LISTA TOKENÓW SPOT (BINANCE API)
 # ==========================================
 TOKENS = [
-    {"symbol": "ONDO", "bybit": "ONDOUSDT", "gecko_id": "ondo-finance"},
-    {"symbol": "INJ", "bybit": "INJUSDT", "gecko_id": "injective-protocol"},
-    {"symbol": "LINK", "bybit": "LINKUSDT", "gecko_id": "chainlink"},
-    {"symbol": "RENDER", "bybit": "RENDERUSDT", "gecko_id": "render-token"},
-    {"symbol": "FET", "bybit": "FETUSDT", "gecko_id": "artificial-superintelligence-alliance"},
-    {"symbol": "BTC", "bybit": "BTCUSDT", "gecko_id": "bitcoin"},
-    {"symbol": "ETH", "bybit": "ETHUSDT", "gecko_id": "ethereum"},
-    {"symbol": "ENA", "bybit": "ENAUSDT", "gecko_id": "ethena"},
-    {"symbol": "PENDLE", "bybit": "PENDLEUSDT", "gecko_id": "pendle"},
-    {"symbol": "NEAR", "bybit": "NEARUSDT", "gecko_id": "near"},
-    {"symbol": "PLUME", "bybit": "PLUMEUSDT", "gecko_id": "plume"},
-    {"symbol": "JUP", "bybit": "JUPUSDT", "gecko_id": "jupiter-exchange-solana"},
-    {"symbol": "UNI", "bybit": "UNIUSDT", "gecko_id": "uniswap"},
-    {"symbol": "SEI", "bybit": "SEIUSDT", "gecko_id": "sei-network"},
-    {"symbol": "SOL", "bybit": "SOLUSDT", "gecko_id": "solana"},
+    {"symbol": "ONDO", "binance": "ONDOUSDT"},
+    {"symbol": "INJ", "binance": "INJUSDT"},
+    {"symbol": "LINK", "binance": "LINKUSDT"},
+    {"symbol": "RENDER", "binance": "RENDERUSDT"},
+    {"symbol": "FET", "binance": "FETUSDT"},
+    {"symbol": "BTC", "binance": "BTCUSDT"},
+    {"symbol": "ETH", "binance": "ETHUSDT"},
+    {"symbol": "ENA", "binance": "ENAUSDT"},
+    {"symbol": "PENDLE", "binance": "PENDLEUSDT"},
+    {"symbol": "NEAR", "binance": "NEARUSDT"},
+    {"symbol": "JUP", "binance": "JUPUSDT"},
+    {"symbol": "UNI", "binance": "UNIUSDT"},
+    {"symbol": "SEI", "binance": "SEIUSDT"},
+    {"symbol": "SOL", "binance": "SOLUSDT"},
 ]
 
 def fmt(val):
@@ -134,7 +133,7 @@ def fmt(val):
     return val
 
 # ==========================================
-# FUNKCJE POBIERANIA DANYCH I WSKAŹNIKÓW
+# FUNKCJE POBIERANIA DANYCH Z BINANCE API
 # ==========================================
 def get_fear_and_greed():
     try:
@@ -180,57 +179,35 @@ def calculate_altcoin_season_index():
     except Exception:
         return 45
 
-def fetch_from_bybit(symbol_pair, interval="60", limit=336):
-    url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={symbol_pair}&interval={interval}&limit={limit}"
+def fetch_from_binance(symbol_pair, interval="1h", limit=336):
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol_pair}&interval={interval}&limit={limit}"
     res = requests.get(url, timeout=5)
     res.raise_for_status()
-    data = res.json()
-    if data.get("retCode") != 0:
-        return pd.DataFrame()
-    raw_candles = data["result"]["list"]
-    df = pd.DataFrame(raw_candles, columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"])
-    df = df.iloc[::-1].reset_index(drop=True)
-    df["dt"] = pd.to_datetime(df["timestamp"].astype(int), unit="ms")
+    raw_candles = res.json()
+    df = pd.DataFrame(raw_candles, columns=[
+        "open_time", "open", "high", "low", "close", "volume",
+        "close_time", "quote_asset_volume", "number_of_trades",
+        "taker_buy_base_asset_volume", "taker_buy_quote_asset_volume", "ignore"
+    ])
+    df["dt"] = pd.to_datetime(df["open_time"], unit="ms")
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = df[col].astype(float)
     return df[["dt", "open", "high", "low", "close", "volume"]]
 
-def fetch_from_coingecko(gecko_id):
-    url = f"https://api.coingecko.com/api/v3/coins/{gecko_id}/ohlc?vs_currency=usd&days=14"
-    res = requests.get(url, headers={"User-Agent": "CryptoDashboard/1.0"}, timeout=5)
-    res.raise_for_status()
-    df = pd.DataFrame(res.json(), columns=["timestamp", "open", "high", "low", "close"])
-    df["dt"] = pd.to_datetime(df["timestamp"], unit="ms")
-    df["volume"] = 0.0
-    return df.sort_values("dt").reset_index(drop=True)
-
-def get_simple_coingecko_price(gecko_id):
+def get_candles_1h(token_info):
     try:
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={gecko_id}&vs_currencies=usd,usd_24h_change"
-        res = requests.get(url, headers={"User-Agent": "CryptoDashboard/1.0"}, timeout=4).json()
-        if gecko_id in res:
-            price = float(res[gecko_id].get("usd", 0))
-            change = float(res[gecko_id].get("usd_24h_change", 0))
-            if price > 0: return price, change
+        df = fetch_from_binance(token_info["binance"], interval="1h", limit=336)
+        if not df.empty and len(df) >= 20: return df
     except Exception:
         pass
-    return 1.0, 0.0
-
-def get_candles_1h(token_info):
-    if token_info.get("bybit"):
-        try:
-            df = fetch_from_bybit(token_info["bybit"], interval="60", limit=336)
-            if not df.empty and len(df) >= 20: return df
-        except Exception: pass
-    try: return fetch_from_coingecko(token_info["gecko_id"])
-    except Exception: return pd.DataFrame()
+    return pd.DataFrame()
 
 def get_candles_1d(token_info):
-    if token_info.get("bybit"):
-        try:
-            df = fetch_from_bybit(token_info["bybit"], interval="D", limit=30)
-            if not df.empty and len(df) >= 14: return df
-        except Exception: pass
+    try:
+        df = fetch_from_binance(token_info["binance"], interval="1d", limit=30)
+        if not df.empty and len(df) >= 14: return df
+    except Exception:
+        pass
     return pd.DataFrame()
 
 def resample_ohlc(df_1h, rule):
@@ -318,7 +295,6 @@ def fetch_technical_analysis():
 
     for item in TOKENS:
         symbol = item["symbol"]
-        gecko_id = item["gecko_id"]
         try:
             df_1h = get_candles_1h(item)
             if df_1h.empty or len(df_1h) < 5: raise ValueError("Brak świec")
@@ -409,37 +385,20 @@ def fetch_technical_analysis():
                 "ATR_Raw": float(atr)
             })
             loaded_count += 1
-            time.sleep(0.05)
-        except Exception:
-            p, chg = get_simple_coingecko_price(gecko_id)
-            data.append({
-                "Lp.": loaded_count + 1,
-                "Token": symbol, "Cena ($)": fmt(p), "24h (%)": round(chg, 2),
-                "Reżim Rynkowy": "Konsolidacja", "EMA 200 (4H)": fmt(p), "EMA 50 (1D)": fmt(p),
-                "Siła vs BTC (72h)": "➡️ NEUTRALNY", "Wsparcie": fmt(p * 0.95), "Opór": fmt(p * 1.05),
-                "SL (ATR)": fmt(p * 0.95), "R:R": "1:1.5",
-                "RSI 4H": 50.0, "RSI 1D": 50.0, "RSI 3D": 50.0, "RVOL (4H)": "1.0x",
-                "VWAP 7D": fmt(p), "VWAP +2Std": fmt(p * 1.05), "OBV Status": "Neutralny (0.0%)",
-                "OBV Odchylenie (%)": 0.0, "MACD Hist (4H)": "0.0",
-                "Price_Raw": p, "EMA200_Raw": p, "EMA50_1D_Raw": p, "Support_Raw": p * 0.95,
-                "Resistance_Raw": p * 1.05, "RSI_4H_Raw": 50.0, "RSI_1D_Raw": 50.0, "RSI_3D_Raw": 50.0,
-                "RVOL_Raw": 1.0, "VWAP_Raw": p, "VWAP_Upper_Raw": p * 1.05, "Is_VWAP_Overextended": False,
-                "OBV_Raw": "Neutralny (0.0%)", "OBV_Diff_Pct": 0.0, "Is_OBV_Accumulating": False,
-                "Regime_Raw": "Konsolidacja", "MTF_Confluence": False, "Vol_Raw": 0.006, 
-                "RS_BTC_Pct": 0.0, "ATR_Raw": p * 0.02
-            })
-            loaded_count += 1
+            time.sleep(0.02)
+        except Exception as e:
+            print(f"Błąd dla {symbol}: {e}")
+            pass
 
     return pd.DataFrame(data), fng_val, fng_class, btc_dom, alt_season, loaded_count, len(TOKENS)
 
-# INTELIGENTNY DRYF (SMART DRIFT) ZAPOBIEGAJĄCY FAŁSZOWANIU BESSY PODCZAS KOREKT
 def calculate_smart_drift(price, support_price, smart_score, is_mtf_bullish):
     base_drift = (smart_score - 50.0) / 100.0 * 0.0005
     dist_to_support = (price - support_price) / price
     
     mean_reversion_boost = 0.0
     if is_mtf_bullish and dist_to_support < 0.025: 
-        mean_reversion_boost = 0.00035 # Premia za odbicie od wsparcia w trendzie wzrostowym
+        mean_reversion_boost = 0.00035
         
     return base_drift + mean_reversion_boost
 
@@ -487,7 +446,6 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         if rsi_3d > 75: score -= 10.0
         score = max(0.0, min(100.0, score))
 
-        # Monte Carlo ze Smart Driftem
         step_drifts = calculate_smart_drift(price, support, score, mtf_confluence)
         shocks = rng.normal(loc=0, scale=1.0, size=(5000, 240))
         
@@ -582,8 +540,10 @@ def auto_zapisz_sygnaly(df_ml, df_ta):
     for _, row in okazje.iterrows():
         token = row["Token"]
         if token not in aktywne_tokeny:
-            cena_we = float(df_ta[df_ta["Token"] == token].iloc[0]["Price_Raw"])
-            atr = float(df_ta[df_ta["Token"] == token].iloc[0]["ATR_Raw"])
+            match_row = df_ta[df_ta["Token"] == token]
+            if match_row.empty: continue
+            cena_we = float(match_row.iloc[0]["Price_Raw"])
+            atr = float(match_row.iloc[0]["ATR_Raw"])
             cel_tp = cena_we * 1.06
             sl = cena_we - (2.5 * atr)
 
@@ -727,7 +687,7 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
 {final_reco}
 """
 
-with st.spinner("🔄 Pobieram dane na żywo z Bybit API i przeliczam wskaźniki..."):
+with st.spinner("🔄 Pobieram dane rynkowe z Binance API i przeliczam wskaźniki..."):
     df_ta, fng_val, fng_class, btc_dom, alt_season, loaded_c, total_c = fetch_technical_analysis()
     df_ml, mc_paths = run_predictions(df_ta, btc_dom, min_smart_score, max_rsi_4h, wymagaj_akumulacji)
     
@@ -736,7 +696,7 @@ with st.spinner("🔄 Pobieram dane na żywo z Bybit API i przeliczam wskaźniki
 
 col_t, col_d1, col_d2, col_f = st.columns([2.0, 1, 1, 1])
 col_t.title("📊 Analiza Krypto MTF Pro")
-col_t.caption(f"Aktualizacja: {pd.Timestamp.now().strftime('%H:%M:%S')} | Załadowano: {loaded_c}/{total_c} (Bybit Spot)")
+col_t.caption(f"Aktualizacja: {pd.Timestamp.now().strftime('%H:%M:%S')} | Załadowano: {loaded_c}/{total_c} (Binance Spot)")
 col_d1.metric("Dominacja BTC", f"{btc_dom}%")
 col_d2.metric("Sezon Altcoinów", f"{alt_season}/100", "Sezon BTC" if alt_season < 50 else "Sezon Alt")
 col_f.metric("Fear & Greed", f"{fng_val}/100", fng_class)
@@ -799,28 +759,30 @@ with tab2:
     chosen_token = col_sel_tok.selectbox("Wybierz token:", df_ta["Token"].tolist(), key="manual_token_pick")
     
     if col_sel_btn.button("🚀 Dodaj do śledzenia", type="primary"):
-        cena_we = float(df_ta[df_ta["Token"] == chosen_token].iloc[0]["Price_Raw"])
-        atr = float(df_ta[df_ta["Token"] == chosen_token].iloc[0]["ATR_Raw"])
-        cel_tp = cena_we * 1.06
-        sl = cena_we - (2.5 * atr)
-        
-        nowa = pd.DataFrame([{
-            "Data Wejścia": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
-            "Token": chosen_token,
-            "Typ Sygnału": "Dodano ręcznie",
-            "Cena Wejścia ($)": round(cena_we, 5),
-            "Cel TP (6%) ($)": round(cel_tp, 5),
-            "SL ($)": round(sl, 5),
-            "Ekstremum ($)": round(cena_we, 5),
-            "Data Wyjścia": "-",
-            "Status": "🔄 W toku",
-            "Zysk (%)": 0.0
-        }])
-        
-        df_h = pd.concat([pd.read_csv(HISTORY_FILE), nowa], ignore_index=True) if os.path.exists(HISTORY_FILE) else nowa
-        df_h.to_csv(HISTORY_FILE, index=False)
-        st.success(f"Rozpoczęto śledzenie {chosen_token} po ${fmt(cena_we)} z celem TP (+6%): ${fmt(cel_tp)}!")
-        st.rerun()
+        match_row = df_ta[df_ta["Token"] == chosen_token]
+        if not match_row.empty:
+            cena_we = float(match_row.iloc[0]["Price_Raw"])
+            atr = float(match_row.iloc[0]["ATR_Raw"])
+            cel_tp = cena_we * 1.06
+            sl = cena_we - (2.5 * atr)
+            
+            nowa = pd.DataFrame([{
+                "Data Wejścia": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
+                "Token": chosen_token,
+                "Typ Sygnału": "Dodano ręcznie",
+                "Cena Wejścia ($)": round(cena_we, 5),
+                "Cel TP (6%) ($)": round(cel_tp, 5),
+                "SL ($)": round(sl, 5),
+                "Ekstremum ($)": round(cena_we, 5),
+                "Data Wyjścia": "-",
+                "Status": "🔄 W toku",
+                "Zysk (%)": 0.0
+            }])
+            
+            df_h = pd.concat([pd.read_csv(HISTORY_FILE), nowa], ignore_index=True) if os.path.exists(HISTORY_FILE) else nowa
+            df_h.to_csv(HISTORY_FILE, index=False)
+            st.success(f"Rozpoczęto śledzenie {chosen_token} po ${fmt(cena_we)} z celem TP (+6%): ${fmt(cel_tp)}!")
+            st.rerun()
 
 with tab3:
     if os.path.exists(HISTORY_FILE):
@@ -875,11 +837,14 @@ if not df_ta.empty:
     
     col_rep_text, col_rep_chart = st.columns([1.2, 1])
     with col_rep_text:
-        st.markdown(generuj_raport_ai(df_ta[df_ta["Token"] == sel_ai].iloc[0], df_ml[df_ml["Token"] == sel_ai].iloc[0] if not df_ml.empty else None, btc_dom))
+        match_ta = df_ta[df_ta["Token"] == sel_ai]
+        match_ml = df_ml[df_ml["Token"] == sel_ai] if not df_ml.empty else pd.DataFrame()
+        if not match_ta.empty:
+            st.markdown(generuj_raport_ai(match_ta.iloc[0], match_ml.iloc[0] if not match_ml.empty else None, btc_dom))
     with col_rep_chart:
         st.markdown("<br><br>", unsafe_allow_html=True)
-        if sel_ai in mc_paths:
-            current_price = float(df_ta[df_ta["Token"] == sel_ai].iloc[0]["Price_Raw"])
+        if sel_ai in mc_paths and not match_ta.empty:
+            current_price = float(match_ta.iloc[0]["Price_Raw"])
             st.plotly_chart(plot_price_forecast(sel_ai, current_price, mc_paths[sel_ai]), use_container_width=True)
         else:
             st.info("Brak danych symulacji dla tego tokena.")
