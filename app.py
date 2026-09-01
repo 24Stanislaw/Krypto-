@@ -113,7 +113,7 @@ TOKENS = [
     {"symbol": "PENDLE", "coinbase": "PENDLE-USD", "gecko_id": "pendle"},
     {"symbol": "NEAR", "coinbase": "NEAR-USD", "gecko_id": "near"},
     {"symbol": "PLUME", "coinbase": "PLUME-USD", "gecko_id": "plume"},
-    {"symbol": "JUP", "coinbase": None, "gecko_id": "jupiter-exchange-solana"},
+    {"symbol": "JUP", "coinbase": "JUP-USD", "gecko_id": "jupiter"},
     {"symbol": "UNI", "coinbase": "UNI-USD", "gecko_id": "uniswap"},
     {"symbol": "SEI", "coinbase": "SEI-USD", "gecko_id": "sei-network"},
     {"symbol": "SOL", "coinbase": "SOL-USD", "gecko_id": "solana"},
@@ -226,8 +226,6 @@ def resample_ohlc(df_1h, rule):
     return df.resample(rule).agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna().reset_index()
 
 def calc_rsi(series, period=14):
-    if len(series) < period + 1:
-        return 50.0
     delta = series.diff()
     gain = delta.clip(lower=0).rolling(period).mean()
     loss = (-delta.clip(upper=0)).rolling(period).mean()
@@ -241,46 +239,40 @@ def calc_macd(series, span1=12, span2=26, signal=9):
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     return float(macd_line.iloc[-1]), float(signal_line.iloc[-1]), float((macd_line - signal_line).iloc[-1])
 
-# [POPRAWKA 1] ROLLING 7-DAY VWAP (168 GODZIN) Z WSTĘGĄ +2 STD
-def calc_vwap_rolling_7d(df_1h):
-    if df_1h.empty or "volume" not in df_1h.columns or df_1h["volume"].sum() == 0:
-        p = float(df_1h["close"].iloc[-1]) if not df_1h.empty else 1.0
+def calc_vwap_with_bands(df):
+    if "volume" not in df.columns or df["volume"].sum() == 0:
+        p = float(df["close"].iloc[-1])
         return p, p * 1.05, False
+    typical_price = (df["high"] + df["low"] + df["close"]) / 3
+    cum_vol = df["volume"].cumsum()
+    vwap = (typical_price * df["volume"]).cumsum() / cum_vol
     
-    df_7d = df_1h.tail(168).copy()
-    typical_price = (df_7d["high"] + df_7d["low"] + df_7d["close"]) / 3
-    cum_vol = df_7d["volume"].cumsum()
-    vwap = (typical_price * df_7d["volume"]).cumsum() / (cum_vol + 1e-9)
-    
-    variance = ((typical_price - vwap) ** 2 * df_7d["volume"]).cumsum() / (cum_vol + 1e-9)
+    variance = ((typical_price - vwap) ** 2 * df["volume"]).cumsum() / cum_vol
     std_dev = np.sqrt(variance)
     
     vwap_val = float(vwap.iloc[-1])
     upper_band_2std = vwap_val + (2.0 * float(std_dev.iloc[-1]))
-    curr_price = float(df_7d["close"].iloc[-1])
+    curr_price = float(df["close"].iloc[-1])
     
     is_overextended = curr_price >= upper_band_2std
     return vwap_val, upper_band_2std, is_overextended
 
-# [POPRAWKA 2] WYGŁADZONY OBV Z PROCENTOWYM ODCHYLANIEM OD EMA10
-def calc_smoothed_obv(df_4h):
-    if "volume" not in df_4h.columns or df_4h["volume"].sum() == 0:
-        return "Neutralny (0.0%)", 0.0, False
-    direction = np.sign(df_4h["close"].diff()).fillna(0)
-    obv = (direction * df_4h["volume"]).cumsum()
+def calc_smoothed_obv(df):
+    if "volume" not in df.columns or df["volume"].sum() == 0:
+        return "Neutralny", False
+    direction = np.sign(df["close"].diff()).fillna(0)
+    obv = (direction * df["volume"]).cumsum()
     obv_ema10 = obv.ewm(span=10, adjust=False).mean()
     
-    curr_obv = float(obv.iloc[-1])
-    curr_ema = float(obv_ema10.iloc[-1])
+    curr_obv = obv.iloc[-1]
+    curr_ema = obv_ema10.iloc[-1]
     
-    diff_pct = ((curr_obv - curr_ema) / (abs(curr_ema) + 1e-9)) * 100
-    is_accumulating = diff_pct > 0
-    
+    is_accumulating = (curr_obv > curr_ema) and (curr_obv > obv.iloc[-2] if len(obv) > 1 else True)
     if is_accumulating:
-        status = f"🟢 Akumulacja (+{diff_pct:.2f}%)"
+        status = "🟢 Akumulacja (OBV > EMA10)"
     else:
-        status = f"🔴 Dystrybucja ({diff_pct:.2f}%)"
-    return status, round(diff_pct, 2), is_accumulating
+        status = "🔴 Dystrybucja / Szum (OBV < EMA10)"
+    return status, is_accumulating
 
 def calc_rvol(df, period=20):
     if "volume" not in df.columns or df["volume"].sum() == 0 or len(df) < period: return 1.0
@@ -299,7 +291,7 @@ def fetch_technical_analysis():
 
     btc_info = next((item for item in TOKENS if item["symbol"] == "BTC"), TOKENS[5])
     btc_df_1h = get_candles_1h(btc_info)
-    btc_closes_1h = btc_df_1h["close"] if not btc_df_1h.empty else pd.Series([60000.0]*72)
+    btc_closes_1h = btc_df_1h["close"] if not btc_df_1h.empty else pd.Series([60000.0]*24)
 
     for item in TOKENS:
         symbol = item["symbol"]
@@ -307,16 +299,13 @@ def fetch_technical_analysis():
         try:
             df_1h = get_candles_1h(item)
             if df_1h.empty or len(df_1h) < 5: raise ValueError("Brak świec")
-            
             df_4h = resample_ohlc(df_1h, "4h")
-            df_1d = resample_ohlc(df_1h, "1d") if len(df_1h) >= 24 else get_candles_1d(item)
-            df_3d = resample_ohlc(df_1h, "3d") if len(df_1h) >= 72 else df_1d
+            df_1d = get_candles_1d(item)
 
             price = float(df_1h["close"].iloc[-1])
             prev_price_24h = float(df_1h["close"].iloc[-24] if len(df_1h) >= 24 else df_1h["close"].iloc[0])
             change_24h = ((price - prev_price_24h) / prev_price_24h) * 100
 
-            # [POPRAWKA 3] SIŁA WZGLĘDNA VS BTC W OKNIE 72H (3 DNI)
             if symbol == "BTC":
                 rs_vs_btc_pct = 0.0
                 rs_vs_btc_status = "➡️ BAZA (Bitcoin)"
@@ -324,11 +313,10 @@ def fetch_technical_analysis():
                 min_len = min(len(df_1h["close"]), len(btc_closes_1h))
                 token_closes = df_1h["close"].iloc[-min_len:].reset_index(drop=True)
                 btc_closes = btc_closes_1h.iloc[-min_len:].reset_index(drop=True)
-                ratio = token_closes / (btc_closes + 1e-9)
+                ratio = token_closes / btc_closes
                 ratio_now = ratio.iloc[-1]
-                lookback = 72 if len(ratio) >= 72 else len(ratio) - 1
-                ratio_72h = ratio.iloc[-lookback] if lookback > 0 else ratio.iloc[0]
-                rs_vs_btc_pct = float(((ratio_now - ratio_72h) / (ratio_72h + 1e-9)) * 100)
+                ratio_24h = ratio.iloc[-24] if len(ratio) >= 24 else ratio.iloc[0]
+                rs_vs_btc_pct = float(((ratio_now - ratio_24h) / ratio_24h) * 100)
                 rs_vs_btc_status = f"🟢 OUTPERFORM (+{rs_vs_btc_pct:.2f}%)" if rs_vs_btc_pct > 0 else f"🔴 UNDERPERFORM ({rs_vs_btc_pct:.2f}%)"
 
             log_returns = np.log(df_1h["close"] / df_1h["close"].shift(1)).dropna()
@@ -339,25 +327,21 @@ def fetch_technical_analysis():
             raw_drift = float(log_returns.mean()) if len(log_returns) > 5 else 0.0
             drift_1h = float(np.clip(raw_drift, -0.0003, 0.0003))
 
-            # [POPRAWKA 4] TRIADA RSI: 4H / 1D / 3D
+            rsi_1h = calc_rsi(df_1h["close"])
             rsi_4h = calc_rsi(df_4h["close"]) if len(df_4h) >= 14 else 50.0
-            rsi_1d = calc_rsi(df_1d["close"]) if len(df_1d) >= 14 else 50.0
-            rsi_3d = calc_rsi(df_3d["close"]) if len(df_3d) >= 14 else rsi_1d
+            rsi_1d = calc_rsi(df_1d["close"]) if not df_1d.empty and len(df_1d) >= 14 else rsi_4h
 
             _, _, macd_hist = calc_macd(df_4h["close"]) if len(df_4h) >= 26 else (0.0, 0.0, 0.0)
             
-            # ROLLING 7D VWAP
-            vwap_val, vwap_upper_2std, is_vwap_overextended = calc_vwap_rolling_7d(df_1h)
-            
-            # OBV ODCHYLENIE PROCENTOWE
-            obv_status, obv_diff_pct, is_obv_accumulating = calc_smoothed_obv(df_4h)
+            vwap_val, vwap_upper_2std, is_vwap_overextended = calc_vwap_with_bands(df_4h)
+            obv_status, is_obv_accumulating = calc_smoothed_obv(df_4h)
             rvol_val = calc_rvol(df_4h)
 
             tr = pd.concat([df_4h["high"] - df_4h["low"], (df_4h["high"] - df_4h["close"].shift()).abs(), (df_4h["low"] - df_4h["close"].shift()).abs()], axis=1).max(axis=1) if len(df_4h) > 1 else pd.Series([price * 0.02])
             atr = float(tr.rolling(min(14, len(df_4h))).mean().iloc[-1]) if len(tr) > 0 else price * 0.02
             
             ema200_4h = float(df_4h["close"].ewm(span=min(200, len(df_4h)), adjust=False).mean().iloc[-1]) if len(df_4h) > 0 else price
-            ema50_1d = float(df_1d["close"].ewm(span=min(50, len(df_1d)), adjust=False).mean().iloc[-1]) if len(df_1d) >= 50 else (price * 0.98)
+            ema50_1d = float(df_1d["close"].ewm(span=min(50, len(df_1d)), adjust=False).mean().iloc[-1]) if not df_1d.empty and len(df_1d) >= 50 else (price * 0.98)
 
             sl = price - (2.5 * atr)
             support = float(df_4h["low"].min()) if len(df_4h) > 0 else price * 0.95
@@ -383,26 +367,22 @@ def fetch_technical_analysis():
             data.append({
                 "Lp.": loaded_count + 1,
                 "Token": symbol, "Cena ($)": fmt(price), "24h (%)": round(change_24h, 2), 
+                "Siła vs BTC (24h)": rs_vs_btc_status,
                 "Reżim Rynkowy": regime,
-                "EMA 200 (4H)": fmt(ema200_4h), "EMA 50 (1D)": fmt(ema50_1d),
-                "Siła vs BTC (72h)": rs_vs_btc_status,
-                "Wsparcie": fmt(support), "Opór": fmt(resistance), "SL (ATR)": fmt(sl), "R:R": f"1:{rr_val}",
-                
-                # Zmienne do Zakładki 2
-                "RSI 4H": round(rsi_4h, 1), "RSI 1D": round(rsi_1d, 1), "RSI 3D": round(rsi_3d, 1),
-                "RVOL (4H)": f"{rvol_val}x", "VWAP 7D": fmt(vwap_val), "VWAP +2Std": fmt(vwap_upper_2std),
-                "OBV Status": obv_status, "OBV Odchylenie (%)": obv_diff_pct,
-                "MACD Hist (4H)": fmt(macd_hist),
-                
-                # Dane Surowe (Pola Pomocnicze)
+                "RSI 1H": round(rsi_1h, 1), "RSI 4H": round(rsi_4h, 1), "RSI 1D": round(rsi_1d, 1),
+                "RVOL (4H)": f"{rvol_val}x", "VWAP (4H)": fmt(vwap_val), "VWAP +2Std": fmt(vwap_upper_2std),
+                "OBV Status": obv_status,
+                "MACD Hist (4H)": fmt(macd_hist), "EMA 200 (4H)": fmt(ema200_4h), "EMA 50 (1D)": fmt(ema50_1d),
+                "SL (ATR)": fmt(sl), "Wsparcie": fmt(support), "Opór": fmt(resistance), "R:R": f"1:{rr_val}",
                 "Price_Raw": float(price), "EMA200_Raw": float(ema200_4h), "EMA50_1D_Raw": float(ema50_1d),
                 "Support_Raw": float(support), "Resistance_Raw": float(resistance), 
-                "RSI_4H_Raw": float(rsi_4h), "RSI_1D_Raw": float(rsi_1d), "RSI_3D_Raw": float(rsi_3d), 
+                "RSI_1H_Raw": float(rsi_1h), "RSI_4H_Raw": float(rsi_4h), "RSI_1D_Raw": float(rsi_1d), 
                 "RVOL_Raw": float(rvol_val), "VWAP_Raw": float(vwap_val), "VWAP_Upper_Raw": float(vwap_upper_2std),
                 "Is_VWAP_Overextended": is_vwap_overextended,
-                "OBV_Raw": obv_status, "OBV_Diff_Pct": obv_diff_pct, "Is_OBV_Accumulating": is_obv_accumulating,
+                "OBV_Raw": obv_status, "Is_OBV_Accumulating": is_obv_accumulating,
                 "Regime_Raw": regime, "MTF_Confluence": mtf_confluence,
                 "Vol_Raw": vol_1h, "Drift_Raw": drift_1h, "RS_BTC_Pct": rs_vs_btc_pct,
+                "Is_Bouncing": float(df_1h["close"].iloc[-1]) >= float(df_1h["open"].iloc[-1]),
                 "ATR_Raw": float(atr)
             })
             loaded_count += 1
@@ -411,26 +391,22 @@ def fetch_technical_analysis():
             data.append({
                 "Lp.": loaded_count + 1,
                 "Token": symbol, "Cena ($)": fmt(p), "24h (%)": round(chg, 2),
-                "Reżim Rynkowy": "Konsolidacja", "EMA 200 (4H)": fmt(p), "EMA 50 (1D)": fmt(p),
-                "Siła vs BTC (72h)": "➡️ NEUTRALNY", "Wsparcie": fmt(p * 0.95), "Opór": fmt(p * 1.05),
-                "SL (ATR)": fmt(p * 0.95), "R:R": "1:1.5",
-                "RSI 4H": 50.0, "RSI 1D": 50.0, "RSI 3D": 50.0, "RVOL (4H)": "1.0x",
-                "VWAP 7D": fmt(p), "VWAP +2Std": fmt(p * 1.05), "OBV Status": "Neutralny (0.0%)",
-                "OBV Odchylenie (%)": 0.0, "MACD Hist (4H)": "0.0",
-                "Price_Raw": p, "EMA200_Raw": p, "EMA50_1D_Raw": p, "Support_Raw": p * 0.95,
-                "Resistance_Raw": p * 1.05, "RSI_4H_Raw": 50.0, "RSI_1D_Raw": 50.0, "RSI_3D_Raw": 50.0,
-                "RVOL_Raw": 1.0, "VWAP_Raw": p, "VWAP_Upper_Raw": p * 1.05, "Is_VWAP_Overextended": False,
-                "OBV_Raw": "Neutralny (0.0%)", "OBV_Diff_Pct": 0.0, "Is_OBV_Accumulating": False,
-                "Regime_Raw": "Konsolidacja", "MTF_Confluence": False, "Vol_Raw": 0.006, "Drift_Raw": 0.0,
-                "RS_BTC_Pct": 0.0, "ATR_Raw": p * 0.02
+                "Siła vs BTC (24h)": "➡️ NEUTRALNY",
+                "Reżim Rynkowy": "Konsolidacja",
+                "RSI 1H": 50.0, "RSI 4H": 50.0, "RSI 1D": 50.0, "RVOL (4H)": "1.0x", "VWAP (4H)": fmt(p),
+                "VWAP +2Std": fmt(p * 1.05), "OBV Status": "Neutralny", "MACD Hist (4H)": "0.0", 
+                "EMA 200 (4H)": fmt(p), "EMA 50 (1D)": fmt(p), "SL (ATR)": fmt(p * 0.95),
+                "Wsparcie": fmt(p * 0.95), "Opór": fmt(p * 1.05), "R:R": "1:1.5", "Price_Raw": p, "EMA200_Raw": p,
+                "EMA50_1D_Raw": p, "Support_Raw": p * 0.95, "Resistance_Raw": p * 1.05, "RSI_1H_Raw": 50.0, 
+                "RSI_4H_Raw": 50.0, "RSI_1D_Raw": 50.0, "RVOL_Raw": 1.0, "VWAP_Raw": p, "VWAP_Upper_Raw": p * 1.05,
+                "Is_VWAP_Overextended": False, "OBV_Raw": "Neutralny", "Is_OBV_Accumulating": False,
+                "Regime_Raw": "Konsolidacja", "MTF_Confluence": False,
+                "Vol_Raw": 0.006, "Drift_Raw": 0.0, "RS_BTC_Pct": 0.0, "Is_Bouncing": False, "ATR_Raw": p * 0.02
             })
             loaded_count += 1
 
     return pd.DataFrame(data), fng_val, fng_class, btc_dom, alt_season, loaded_count, len(TOKENS)
 
-# ==========================================
-# SCORING I PREDYKCJE (STABILNE MONTE CARLO 10 DNI)
-# ==========================================
 def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumulation):
     if df_ta.empty: return pd.DataFrame(), {}
     rng = np.random.default_rng(seed=int(pd.Timestamp.now().strftime("%Y%m%d%H")))
@@ -444,11 +420,9 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         drift_1h = float(row.get("Drift_Raw", 0.0))
         regime = row["Regime_Raw"]
         mtf_confluence = bool(row.get("MTF_Confluence", False))
+        rsi_1h = float(row["RSI_1H_Raw"])
         rsi_4h = float(row["RSI_4H_Raw"])
-        rsi_1d = float(row["RSI_1D_Raw"])
-        rsi_3d = float(row["RSI_3D_Raw"])
         is_obv_acc = bool(row.get("Is_OBV_Accumulating", False))
-        obv_diff_pct = float(row.get("OBV_Diff_Pct", 0.0))
         rvol = float(row.get("RVOL_Raw", 1.0))
         resistance = float(row.get("Resistance_Raw", price * 1.05))
         is_vwap_overextended = bool(row.get("Is_VWAP_Overextended", False))
@@ -456,30 +430,19 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
 
         score = 50.0 
         
-        # 1. Konfluencja MTF (4H + 1D)
         if mtf_confluence: score += 25.0
         elif "Wzrost 4H" in regime: score += 10.0
         elif "Spadkowy" in regime: score -= 20.0
 
-        # 2. Siła Względna vs BTC (Okienko 72h)
         if rs_btc_pct > 2.0: score += 12.0
         elif rs_btc_pct < -2.0: score -= 10.0
 
-        # 3. RVOL i Odchylenie OBV (%)
-        score += (rvol - 1.0) * 12.0  
-        if obv_diff_pct > 0:
-            score += min(15.0, obv_diff_pct * 1.5)
-        else:
-            score += max(-15.0, obv_diff_pct * 1.5)
+        score += (rvol - 1.0) * 15.0  
+        if is_obv_acc: score += 12.0
+        else: score -= 12.0
 
-        # 4. Triada RSI (4H / 1D / 3D)
-        if rsi_4h < 45: score += (45 - rsi_4h) * 0.3
-        elif rsi_4h > 65: score -= (rsi_4h - 65) * 0.5
-
-        if rsi_1d < 45: score += (45 - rsi_1d) * 0.2
-        elif rsi_1d > 70: score -= (rsi_1d - 70) * 0.4
-
-        if rsi_3d > 75: score -= 10.0
+        if rsi_4h < 45: score += (45 - rsi_4h) * 0.4
+        elif rsi_4h > 65: score -= (rsi_4h - 65) * 0.6
 
         score = max(0.0, min(100.0, score))
 
@@ -511,12 +474,12 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         is_altcoin = symbol not in ["BTC", "ETH"]
         macro_headwind = btc_dom > 59.0 and is_altcoin
 
-        is_overextended = (rsi_4h > 65.0) or (price >= resistance * 0.99) or is_vwap_overextended
+        is_overextended = (rsi_1h > 65.0) or (price >= resistance * 0.99) or is_vwap_overextended
 
         if macro_headwind: 
             signal = "⏳ ODRZUCONY (Silna dominacja BTC)"
         elif is_vwap_overextended:
-            signal = "❌ ODRZUCONY (Przegrzany przy Wstędze VWAP 7D +2 Std)"
+            signal = "❌ ODRZUCONY (Przegrzany przy Wstędze VWAP +2 Std)"
         elif is_overextended: 
             signal = "❌ ODRZUCONY (Przegrzany – Unikamy szczytu)"
         elif score >= min_score_filter and rsi_4h <= max_rsi_filter and mtf_confluence:
@@ -538,12 +501,9 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
 
     df_ml = df_ta.copy()
     df_ml[["Prognoza 24h", "Prognoza 3D", "Prognoza 10D", "Zasięg MC 10D (95%)", "Szansa Wzrostu (10D)", "Ocena Przewagi (Edge)", "Smart Score (%)", "Prognoza_10D_Raw"]] = df_ml.apply(analyze_row, axis=1)
-    df_ml["Smart Score (%)"] = df_ml["Smart Score (%)"].round(2)
+    df_ml["Atrakcyjność (%)"] = df_ml["Smart Score (%)"]
     return df_ml, monte_carlo_paths
 
-# ==========================================
-# WYKRES PLOTLY
-# ==========================================
 def plot_price_forecast(symbol, current_price, price_paths):
     median_path = np.median(price_paths, axis=0)
     upper_95 = np.percentile(price_paths, 97.5, axis=0)
@@ -567,13 +527,10 @@ def plot_price_forecast(symbol, current_price, price_paths):
     fig.update_layout(
         title=f"📈 Prognoza Trajektorii Ceny 10D (Monte Carlo): {symbol}",
         xaxis_title="Godziny od teraz", yaxis_title="Cena ($)",
-        template="plotly_white", height=420, margin=dict(l=20, r=20, t=50, b=20)
+        template="plotly_white", height=400, margin=dict(l=20, r=20, t=50, b=20)
     )
     return fig
 
-# ==========================================
-# SYSTEM AUTO-ŚLEDZENIA ZAGRAŃ (ZAPIS I ROZLICZANIE)
-# ==========================================
 def auto_zapisz_sygnaly(df_ml, df_ta):
     if df_ml.empty: return
     kolumny = ["Data Wejścia", "Token", "Typ Sygnału", "Cena Wejścia ($)", "Cel TP (6%) ($)", "SL ($)", "Ekstremum ($)", "Data Wyjścia", "Status", "Zysk (%)"]
@@ -638,7 +595,7 @@ def aktualizuj_i_rozlicz_pozycje(df_ta):
         curr_price = float(price_map[token])
         entry = float(row["Cena Wejścia ($)"])
         
-        cel_tp = float(row.get("Cel TP (6%) ($)", entry * 1.06))
+        cel_tp = float(row.get("Cel TP (6%) ($)", row.get("Cel 7D ($)", entry * 1.06)))
         sl = float(row["SL ($)"])
 
         prev_extr = float(row["Ekstremum ($)"]) if pd.notna(row["Ekstremum ($)"]) else entry
@@ -674,9 +631,6 @@ def aktualizuj_i_rozlicz_pozycje(df_ta):
 
     df_hist.to_csv(HISTORY_FILE, index=False)
 
-# ==========================================
-# OBSZERNY RAPORT AI Z PROGNOZĄ W PODSUMOWANIU
-# ==========================================
 def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     symbol = row_ta.get("Token", "UNKNOWN")
     price_raw = float(row_ta.get("Price_Raw", 0))
@@ -684,18 +638,16 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     ema50_1d_raw = float(row_ta.get("EMA50_1D_Raw", 0))
     regime = row_ta.get("Reżim Rynkowy", "Neutralny")
     
+    rsi_1h = float(row_ta.get("RSI_1H_Raw", 50))
     rsi_4h = float(row_ta.get("RSI_4H_Raw", 50))
     rsi_1d = float(row_ta.get("RSI_1D_Raw", 50))
-    rsi_3d = float(row_ta.get("RSI_3D_Raw", 50))
     
     rvol_str = str(row_ta.get("RVOL (4H)", "1.0x"))
     vwap_val = float(row_ta.get("VWAP_Raw", price_raw))
     vwap_upper = float(row_ta.get("VWAP_Upper_Raw", price_raw * 1.05))
     is_vwap_overextended = bool(row_ta.get("Is_VWAP_Overextended", False))
-    
     obv_status = row_ta.get("OBV Status", "Neutralny")
-    obv_diff_pct = float(row_ta.get("OBV_Diff_Pct", 0.0))
-    rs_btc_status = str(row_ta.get("Siła vs BTC (72h)", "Neutralny"))
+    rs_btc_status = str(row_ta.get("Siła vs BTC (24h)", "Neutralny"))
     macd_hist = float(row_ta.get("MACD Hist (4H)", 0.0))
     
     support_str = row_ta.get("Wsparcie", "0.00")
@@ -704,95 +656,67 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     
     edge_status = row_ml.get("Ocena Przewagi (Edge)", "-") if row_ml is not None else "-"
     smart_score = f"{float(row_ml.get('Smart Score (%)', 50.0)):.2f}" if row_ml is not None else "50.00"
-    prognoza_24h = row_ml.get("Prognoza 24h", "-") if row_ml is not None else "-"
-    prognoza_3d = row_ml.get("Prognoza 3D", "-") if row_ml is not None else "-"
     prognoza_10d = row_ml.get("Prognoza 10D", "-") if row_ml is not None else "-"
     zasieg_mc_10d = row_ml.get("Zasięg MC 10D (95%)", "-") if row_ml is not None else "-"
     prob_up_10d = row_ml.get("Szansa Wzrostu (10D)", "-") if row_ml is not None else "-"
     
     target_tp1 = price_raw * 1.06
 
-    # Opisy sekcji
-    pa_desc = f"Aktywo znajduje się w reżimie **{regime}**. Aktualny kurs wynosi `{fmt(price_raw)} $`. Średnia EMA200 4H przebiega na poziomie `{fmt(ema200_raw)} $`, natomiast wyższa średnia EMA50 1D znajduje się przy `{fmt(ema50_1d_raw)} $`. "
-    if "Silny Trend" in regime:
-        pa_desc += "Mamy do czynienia z pełną konfluencją trendu na dwóch interwałach, co świadczy o strukturalnej dominacji strony popytowej."
-    elif "Wzrost 4H" in regime:
-        pa_desc += "Lokalny trend wzrostowy na 4H natrafia na opór wyższego rzędu przy średniej EMA50 1D. Wymagana ostrożność."
-    else:
-        pa_desc += "Cena pozostaje poniżej kluczowych średnich, co zwiększa ryzyko kontynuacji spadków lub trwałej konsolidacji."
+    pa_desc = f"Aktywo wykazuje reżim: **{regime}**. Cena wynosi `{fmt(price_raw)} $` i jest weryfikowana na dwóch interwałach (EMA200 4H: `{fmt(ema200_raw)} $` | EMA50 1D: `{fmt(ema50_1d_raw)} $`). " + ("Trwała konfluencja obu średnich potwierdza strukturalną przewagę popytu." if "Silny Trend" in regime else "Brak pełnej konfluencji sugeruje ryzyko lokalnego oporu lub kontrtrendu.")
 
-    btc_dom_desc = f"Dominacja Bitcoina na poziomie `{btc_dom}%` wpływa na całe otoczenie rynkowe. "
-    btc_dom_desc += f"Wskaźnik Siły Względnej dla {symbol} w relacji do BTC (okienko 72h) wynosi: `{rs_btc_status}`. "
-    if obv_diff_pct > 0:
-        btc_dom_desc += f"Dodatnie odchylenie OBV od EMA10 wynoszące `{obv_diff_pct:.2f}%` potwerdza realny dopływ kapitału."
-    else:
-        btc_dom_desc += f"Ujemne odchylenie OBV (`{obv_diff_pct:.2f}%`) ostrzega przed brakiem akumulacji."
+    btc_dom_desc = f"Dominacja BTC wynosząca `{btc_dom}%` wyznacza klimat rynkowy. " + (f"Status Siły Względnej dla {symbol} w relacji do Bitcoina: `{rs_btc_status}`." )
 
     rvol_float = float(rvol_str.replace("x", "")) if "x" in rvol_str else 1.0
-    rvol_desc = f"**RVOL (Względny Wolumen 4H):** `{rvol_str}`. " + ("Obserwujemy anomalię wolumenową – aktywność Smart Money." if rvol_float >= 1.5 else "Obroty pozostają na standardowym poziomie.")
+    rvol_desc = f"**RVOL (Względny Wolumen):** `{rvol_str}`. " + ("Wyraźna anomalia obrotu wskazująca na Smart Money." if rvol_float >= 1.5 else "Standardowy obrót rynkowy.")
 
-    vwap_desc = f"**VWAP 7-Dniowy (Rolling):** Zlokalizowany przy `{fmt(vwap_val)} $`, z górną wstęgą +2 Std przy `{fmt(vwap_upper)} $`. "
-    if is_vwap_overextended:
-        vwap_desc += "⚠️ **Ryzyko Przegrzania:** Cena osiągnęła górną wstęgę +2 Std, co statystycznie zwiększa prawdopodobieństwo korekty do średniej (Mean Reversion)."
-    else:
-        vwap_desc += "Cena utrzymuje się w bezpiecznym przedziale względem tygodniowego VWAP."
+    vwap_desc = f"**VWAP i Wstęgi Odchylenia (+2 Std):** Główna linia VWAP leży przy `{fmt(vwap_val)} $`, a górna wstęga +2 Std przy `{fmt(vwap_upper)} $`. " + ("⚠️ **Ostrzeżenie:** Cena dotknęła lub przebiła górną wstęgę +2 Std – wysokie ryzyko ściągnięcia do średniej (Mean Reversion)." if is_vwap_overextended else "Cena znajduje się bezpiecznie poniżej górnej wstęgi +2 Std.")
+    
+    obv_desc = f"**Wygładzony OBV (z EMA10):** Odczyt to `{obv_status}`. Nałożenie 10-okresowej EMA wyeliminowało pojedynczy szum – linia OBV utrzymująca się nad średnią potwierdza autentyczny napływ kapitału."
 
-    rsi_desc = f"**Triada RSI:** 4H (`{round(rsi_4h, 1)}`), 1D (`{round(rsi_1d, 1)}`), 3D (`{round(rsi_3d, 1)}`). "
-    if rsi_4h < 40:
-        rsi_desc += "Interwał 4H wykazuje lokalne wyprzedanie (potencjalne miejsce odbicia)."
-    elif rsi_4h > 65:
-        rsi_desc += "Interwał 4H sygnalizuje silne wykupienie."
+    rsi_desc = f"**RSI MTF:** 1H (`{round(rsi_1h, 1)}`), 4H (`{round(rsi_4h, 1)}`), 1D (`{round(rsi_1d, 1)}`)."
+    macd_desc = f"**MACD Histogram (4H):** `{fmt(macd_hist)}`."
 
     if "WYSOKI EDGE" in edge_status: 
-        final_reco = "🟢 **REKOMENDACJA:** Sygnał zakupu wysokiej jakości. Struktura MTF, odchylenie OBV oraz symulacja MC wskazują na wyraźną przewagę statystyczną."
+        final_reco = "🟢 **REKOMENDACJA:** Zdecydowane zezwolenie na handel. Aktywo spełnia rygorystyczne kryteria algorytmu (Konfluencja 4H+1D, Wygładzony OBV, bezpieczny VWAP)."
     elif "NEUTRALNY" in edge_status: 
-        final_reco = "🟡 **REKOMENDACJA:** Pozycja neutralna / Obserwacja. Brak pełnej konfluencji średnich lub niedostateczna akumulacja na OBV."
+        final_reco = "🟡 **REKOMENDACJA:** Obserwacja. Brak pełnej konfluencji MTF lub wygładzonego sygnału akumulacji OBV."
     else: 
-        final_reco = "❌ **REKOMENDACJA:** Sygnał odrzucony. Ryzyko wynikające z braku trendu, przegrzania na VWAP lub słabości względnej do BTC."
+        final_reco = "❌ **REKOMENDACJA:** Odrzucenie sygnału. Ryzyko odrzucenia na wstędze VWAP, braku wsparcia EMA lub słabości w relacji do BTC."
 
     return f"""
-### 🎯 EKSPERCKI RAPORT ANALITYCZNY MTF PRO: {symbol}
-**Werdykt Algorytmu:** `{edge_status}` | **Smart Score:** **{smart_score}%** | **Aktualna cena:** `{fmt(price_raw)} $`
+### 🎯 EKSPERCKA SYNTEZA MTF PRO: {symbol}
+**Werdykt:** `{edge_status}` | **Smart Score:** **{smart_score}%** | **Cena wejścia:** `{fmt(price_raw)} $`
 
 ---
-#### 1. 🧠 Analiza Strukturalna i Makroekonomiczna
-* **Struktura MTF (4H EMA200 & 1D EMA50):** {pa_desc}
-* **Dominacja BTC & Siła Względna (72h):** {btc_dom_desc}
+#### 1. 🧠 Analiza Strukturalna i Makro
+* **Konfluencja Trendów (4H EMA200 & 1D EMA50):** {pa_desc}
+* **Siła Względna i Dominacja BTC:** {btc_dom_desc}
 
-#### 2. 📊 Wolumen, 7D VWAP i Smart Money
+#### 2. 📊 Płynność, Wstęgi VWAP i Smart Money
 * {rvol_desc}
 * {vwap_desc}
-* **Wygładzony OBV Status:** `{obv_status}`.
+* {obv_desc}
 
-#### 3. 📈 Momentum i Oscylatory
+#### 3. 📈 Wskaźniki Pędu (Momentum)
 * {rsi_desc}
-* **MACD Histogram 4H:** `{fmt(macd_hist)}`.
+* {macd_desc}
 
-#### 4. 🎲 Symulacja Probabilistyczna Monte Carlo (10 Dni)
-* **Wizja 24-godzinna (Mediana):** `{prognoza_24h}`
-* **Wizja 3-dniowa (Mediana):** `{prognoza_3d}`
-* **Wizja 10-dniowa (Mediana):** `{prognoza_10d}`
-* **Przedział Ufności 95% (10D):** `{zasieg_mc_10d}`
-* **Prawdopodobieństwo wzrostu:** `{prob_up_10d}`
+#### 4. 🎲 Symulacja Monte Carlo (10 Dni)
+* **Mediana prognozy:** `{prognoza_10d}` (Prawdopodobieństwo wzrostu: `{prob_up_10d}`).
+* **Przedział ufności 95%:** `{zasieg_mc_10d}`.
 
-#### 5. 🛡️ Inżynieria Ryzyka i Taktyka
-* **Wsparcie 4H:** `{support_str}` | **Opór 4H:** `{resistance_str}`
-* **Stop Loss (2.5x ATR):** `{sl_str}`
-* **Cel Taktyczny TP (+6%):** `{fmt(target_tp1)} $`
+#### 5. 🛡️ Inżynieria Ryzyka
+* **Wsparcie:** `{support_str}` | **Opór:** `{resistance_str}`
+* **Stop Loss (ATR):** `{sl_str}`
+* **Cel Taktyczny (TP1 +6%):** `{fmt(target_tp1)} $`
 
 ---
-### 📝 PODSUMOWANIE ANALIZY I PROGNOZA KOŃCOWA
-Model ocenia prawdopodobieństwo sukcesu pozycji na podstawie **Smart Score {smart_score}%** w warunkach **{regime}**.
-
-* **Prognoza Krótkoterminowa (1-3 Dni):** Mediana skanera wskazuje poziom `{prognoza_3d}`. Ruch będzie determinowany przez utrzymanie wsparcia na poziomie `{support_str}`.
-* **Prognoza Średnioterminowa (10 Dni):** Mediana symulacji wynosi `{prognoza_10d}` z dolną granicą skrajną `{zasieg_mc_10d.split('-')[0].strip()}` przy szansie powodzenia `{prob_up_10d}`.
+#### 📝 PODSUMOWANIE ANALIZY
+Syntetyczny wynik **Smart Score: {smart_score}%** dla reżimu **{regime}**. 
 
 {final_reco}
 """
 
-# ==========================================
-# INTERFEJS GŁÓWNY STREAMLIT (UI)
-# ==========================================
 with st.spinner("🔄 Pobieram dane na żywo z API i przeliczam wskaźniki..."):
     df_ta, fng_val, fng_class, btc_dom, alt_season, loaded_c, total_c = fetch_technical_analysis()
     df_ml, mc_paths = run_predictions(df_ta, btc_dom, min_smart_score, max_rsi_4h, wymagaj_akumulacji)
@@ -827,26 +751,19 @@ if st.button("🔄 Odśwież dane", type="primary"):
     st.cache_data.clear()
     st.rerun()
 
-# RADYKALNE ROZDZIELENIE DANYCH W ZAKŁADKACH
-df_tab1_view = df_ta[["Lp.", "Token", "Cena ($)", "24h (%)", "Reżim Rynkowy", "EMA 200 (4H)", "EMA 50 (1D)", "Siła vs BTC (72h)", "Wsparcie", "Opór", "SL (ATR)", "R:R"]].copy()
+df_ta_clean = df_ta.drop(columns=["Price_Raw", "EMA200_Raw", "EMA50_1D_Raw", "Support_Raw", "Resistance_Raw", "RSI_1H_Raw", "RSI_4H_Raw", "RSI_1D_Raw", "RVOL_Raw", "VWAP_Raw", "VWAP_Upper_Raw", "Is_VWAP_Overextended", "OBV_Raw", "Is_OBV_Accumulating", "Regime_Raw", "MTF_Confluence", "Vol_Raw", "Drift_Raw", "RS_BTC_Pct", "Is_Bouncing", "ATR_Raw"], errors="ignore")
+if "Atrakcyjność (%)" not in df_ta_clean.columns and not df_ml.empty: df_ta_clean["Atrakcyjność (%)"] = df_ml["Smart Score (%)"]
 
-if not df_ml.empty:
-    df_tab2_view = df_ml[["Lp.", "Token", "Cena ($)", "Smart Score (%)", "Ocena Przewagi (Edge)", "RSI 4H", "RSI 1D", "RSI 3D", "RVOL (4H)", "VWAP 7D", "VWAP +2Std", "OBV Odchylenie (%)", "Prognoza 10D", "Zasięg MC 10D (95%)", "Szansa Wzrostu (10D)"]].copy()
-else:
-    df_tab2_view = pd.DataFrame()
+df_ml_widok = df_ml.drop(columns=["Prognoza_10D_Raw"], errors="ignore") if not df_ml.empty else df_ml
 
-config_tabel_tab1 = {
+config_tabel = {
     "Lp.": st.column_config.NumberColumn("Lp.", format="%d"),
-    "24h (%)": st.column_config.NumberColumn("24h (%)", format="%.2f"),
-}
-
-config_tabel_tab2 = {
-    "Lp.": st.column_config.NumberColumn("Lp.", format="%d"),
+    "Atrakcyjność (%)": st.column_config.NumberColumn("Atrakcyjność (%)", format="%.2f"),
     "Smart Score (%)": st.column_config.NumberColumn("Smart Score (%)", format="%.2f"),
+    "24h (%)": st.column_config.NumberColumn("24h (%)", format="%.2f"),
+    "RSI 1H": st.column_config.NumberColumn("RSI 1H", format="%.1f"),
     "RSI 4H": st.column_config.NumberColumn("RSI 4H", format="%.1f"),
     "RSI 1D": st.column_config.NumberColumn("RSI 1D", format="%.1f"),
-    "RSI 3D": st.column_config.NumberColumn("RSI 3D", format="%.1f"),
-    "OBV Odchylenie (%)": st.column_config.NumberColumn("OBV Odchylenie (%)", format="%.2f"),
 }
 
 def apply_high_contrast_striping(df):
@@ -855,19 +772,16 @@ def apply_high_contrast_striping(df):
         axis=1
     )
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["1. 🏛️ Skaner Makro i Struktura", "2. ⚡ Skaner Sygnałowy i Egzekucja", "3. 🎯 Aktywne Pozycje", "4. 🗂️ Archiwum", "5. 📈 Skuteczność Algorytmu"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["1. Reżimy", "2. Ocena Przewagi", "3. ⚡ Aktywne Pozycje", "4. 🗂️ Archiwum", "5. 📈 Skuteczność Algorytmu"])
 
 with tab1: 
-    st.subheader("🏛️ Struktura Rynkowa i Konfluencja MTF")
-    st.dataframe(apply_high_contrast_striping(df_tab1_view), column_config=config_tabel_tab1, use_container_width=True, hide_index=True)
-
+    st.dataframe(apply_high_contrast_striping(df_ta_clean), column_config=config_tabel, use_container_width=True, hide_index=True)
 with tab2:
-    st.subheader("⚡ Oceny Przewagi i Sygnały Transakcyjne")
-    st.dataframe(apply_high_contrast_striping(df_tab2_view), column_config=config_tabel_tab2, use_container_width=True, hide_index=True)
+    st.dataframe(apply_high_contrast_striping(df_ml_widok), column_config=config_tabel, use_container_width=True, hide_index=True)
     st.markdown("---")
     st.subheader("➕ Śledź wybraną pozycję ręcznie")
     col_sel_tok, col_sel_btn = st.columns([2, 1])
-    chosen_token = col_sel_tok.selectbox("Wybierz token:", df_ta["Token"].tolist(), key="manual_token_pick")
+    chosen_token = col_sel_tok.selectbox("Wybierz token:", df_ml["Token"].tolist(), key="manual_token_pick")
     
     if col_sel_btn.button("🚀 Dodaj do śledzenia", type="primary"):
         cena_we = float(df_ta[df_ta["Token"] == chosen_token].iloc[0]["Price_Raw"])
