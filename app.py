@@ -94,8 +94,8 @@ with st.sidebar:
         help="Odfiltruj tokeny, które są już lokalnie przegrzane/wykupione."
     )
     wymagaj_akumulacji = st.checkbox(
-        "Wymagaj Akumulacji (OBV)", value=True,
-        help="Odrzuca tokeny, w których duży kapitał realizuje zyski (Dystrybucja)."
+        "Wymagaj Akumulacji (Wygładzony OBV > EMA10)", value=True,
+        help="Odrzuca tokeny, w których linia OBV jest poniżej swojej 10-okresowej EMA."
     )
 
 # ==========================================
@@ -239,19 +239,42 @@ def calc_macd(series, span1=12, span2=26, signal=9):
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     return float(macd_line.iloc[-1]), float(signal_line.iloc[-1]), float((macd_line - signal_line).iloc[-1])
 
-def calc_vwap(df):
-    if "volume" not in df.columns or df["volume"].sum() == 0: return float(df["close"].iloc[-1])
+# [NOWOŚĆ 3] VWAP Z WSTĘGAMI ODCHYLENIA STANDARDOWEGO (+2 STD)
+def calc_vwap_with_bands(df):
+    if "volume" not in df.columns or df["volume"].sum() == 0:
+        p = float(df["close"].iloc[-1])
+        return p, p * 1.05, False
     typical_price = (df["high"] + df["low"] + df["close"]) / 3
-    vwap = (typical_price * df["volume"]).cumsum() / df["volume"].cumsum()
-    return float(vwap.iloc[-1])
+    cum_vol = df["volume"].cumsum()
+    vwap = (typical_price * df["volume"]).cumsum() / cum_vol
+    
+    variance = ((typical_price - vwap) ** 2 * df["volume"]).cumsum() / cum_vol
+    std_dev = np.sqrt(variance)
+    
+    vwap_val = float(vwap.iloc[-1])
+    upper_band_2std = vwap_val + (2.0 * float(std_dev.iloc[-1]))
+    curr_price = float(df["close"].iloc[-1])
+    
+    is_overextended = curr_price >= upper_band_2std
+    return vwap_val, upper_band_2std, is_overextended
 
-def calc_obv(df):
-    if "volume" not in df.columns or df["volume"].sum() == 0: return "Neutralny"
+# [NOWOŚĆ 1] WYGŁADZONY OBV Z ŚREDNIĄ EMA10 (ODFILTROWANIE SZUMU)
+def calc_smoothed_obv(df):
+    if "volume" not in df.columns or df["volume"].sum() == 0:
+        return "Neutralny", False
     direction = np.sign(df["close"].diff()).fillna(0)
     obv = (direction * df["volume"]).cumsum()
-    if len(obv) > 5 and obv.iloc[-1] > obv.iloc[-5]: return "Akumulacja (Rosnący OBV)"
-    elif len(obv) > 5 and obv.iloc[-1] < obv.iloc[-5]: return "Dystrybucja (Spadający OBV)"
-    return "Brak wyraźnego trendu OBV"
+    obv_ema10 = obv.ewm(span=10, adjust=False).mean()
+    
+    curr_obv = obv.iloc[-1]
+    curr_ema = obv_ema10.iloc[-1]
+    
+    is_accumulating = (curr_obv > curr_ema) and (curr_obv > obv.iloc[-2] if len(obv) > 1 else True)
+    if is_accumulating:
+        status = "🟢 Akumulacja (OBV > EMA10)"
+    else:
+        status = "🔴 Dystrybucja / Szum (OBV < EMA10)"
+    return status, is_accumulating
 
 def calc_rvol(df, period=20):
     if "volume" not in df.columns or df["volume"].sum() == 0 or len(df) < period: return 1.0
@@ -268,6 +291,11 @@ def fetch_technical_analysis():
     btc_dom = get_global_market_data()
     alt_season = calculate_altcoin_season_index()
 
+    # Najpierw pobieramy szereg cenowy BTC do wyliczania Siły Względnej
+    btc_info = next((item for item in TOKENS if item["symbol"] == "BTC"), TOKENS[5])
+    btc_df_1h = get_candles_1h(btc_info)
+    btc_closes_1h = btc_df_1h["close"] if not btc_df_1h.empty else pd.Series([60000.0]*24)
+
     for item in TOKENS:
         symbol = item["symbol"]
         gecko_id = item["gecko_id"]
@@ -281,13 +309,25 @@ def fetch_technical_analysis():
             prev_price_24h = float(df_1h["close"].iloc[-24] if len(df_1h) >= 24 else df_1h["close"].iloc[0])
             change_24h = ((price - prev_price_24h) / prev_price_24h) * 100
 
+            # [NOWOŚĆ 2] OSOBNY WSKAŹNIK: SIŁA WZGLĘDNA VS BTC (24H)
+            if symbol == "BTC":
+                rs_vs_btc_pct = 0.0
+                rs_vs_btc_status = "➡️ BAZA (Bitcoin)"
+            else:
+                min_len = min(len(df_1h["close"]), len(btc_closes_1h))
+                token_closes = df_1h["close"].iloc[-min_len:].reset_index(drop=True)
+                btc_closes = btc_closes_1h.iloc[-min_len:].reset_index(drop=True)
+                ratio = token_closes / btc_closes
+                ratio_now = ratio.iloc[-1]
+                ratio_24h = ratio.iloc[-24] if len(ratio) >= 24 else ratio.iloc[0]
+                rs_vs_btc_pct = float(((ratio_now - ratio_24h) / ratio_24h) * 100)
+                rs_vs_btc_status = f"🟢 OUTPERFORM (+{rs_vs_btc_pct:.2f}%)" if rs_vs_btc_pct > 0 else f"🔴 UNDERPERFORM ({rs_vs_btc_pct:.2f}%)"
+
             log_returns = np.log(df_1h["close"] / df_1h["close"].shift(1)).dropna()
             
-            # [KOREKTA ZMIENNOŚCI] Przycięcie zmienności 1H do bezpiecznego, realistycznego zakresu (0.3% - 0.8% / h)
             raw_vol_1h = float(log_returns.std()) if len(log_returns) > 5 else 0.008
             vol_1h = float(np.clip(raw_vol_1h, 0.003, 0.008))
             
-            # [KOREKTA DRIFTU] Tłumienie chwilowego szumu 1H (max +- 0.03% / h)
             raw_drift = float(log_returns.mean()) if len(log_returns) > 5 else 0.0
             drift_1h = float(np.clip(raw_drift, -0.0003, 0.0003))
 
@@ -296,13 +336,20 @@ def fetch_technical_analysis():
             rsi_1d = calc_rsi(df_1d["close"]) if not df_1d.empty and len(df_1d) >= 14 else rsi_4h
 
             _, _, macd_hist = calc_macd(df_4h["close"]) if len(df_4h) >= 26 else (0.0, 0.0, 0.0)
-            vwap_val = calc_vwap(df_4h) if len(df_4h) > 0 else price
-            obv_status = calc_obv(df_4h)
+            
+            # [NOWOŚĆ 3] VWAP + WSTĘGA +2 STD
+            vwap_val, vwap_upper_2std, is_vwap_overextended = calc_vwap_with_bands(df_4h)
+            
+            # [NOWOŚĆ 1] WYGŁADZONY OBV Z EMA10
+            obv_status, is_obv_accumulating = calc_smoothed_obv(df_4h)
             rvol_val = calc_rvol(df_4h)
 
             tr = pd.concat([df_4h["high"] - df_4h["low"], (df_4h["high"] - df_4h["close"].shift()).abs(), (df_4h["low"] - df_4h["close"].shift()).abs()], axis=1).max(axis=1) if len(df_4h) > 1 else pd.Series([price * 0.02])
             atr = float(tr.rolling(min(14, len(df_4h))).mean().iloc[-1]) if len(tr) > 0 else price * 0.02
+            
+            # [NOWOŚĆ 4] DWUINTERWAŁOWA KONFLUENCJA EMA (4H EMA200 + 1D EMA50)
             ema200_4h = float(df_4h["close"].ewm(span=min(200, len(df_4h)), adjust=False).mean().iloc[-1]) if len(df_4h) > 0 else price
+            ema50_1d = float(df_1d["close"].ewm(span=min(50, len(df_1d)), adjust=False).mean().iloc[-1]) if not df_1d.empty and len(df_1d) >= 50 else (price * 0.98)
 
             sl = price - (2.5 * atr)
             support = float(df_4h["low"].min()) if len(df_4h) > 0 else price * 0.95
@@ -312,22 +359,38 @@ def fetch_technical_analysis():
             reward = resistance - price
             rr_val = round(reward / risk, 1) if risk > 0 and reward > 0 else 0.1
 
-            if price > ema200_4h and macd_hist > 0: regime = "Silny Trend Wzrostowy"
-            elif price > ema200_4h and macd_hist <= 0: regime = "Korekta w Trendzie Wzrostowym"
-            elif price <= ema200_4h and macd_hist > 0: regime = "Próba Odbicia (Kontrtrend)"
-            else: regime = "Strukturalny Trend Spadkowy"
+            # Określenie dwuinterwałowego Reżimu
+            if price > ema200_4h and price > ema50_1d:
+                regime = "🟢 Silny Trend MTF (4H+1D)"
+                mtf_confluence = True
+            elif price > ema200_4h and price <= ema50_1d:
+                regime = "🟡 Wzrost 4H (Opór EMA50 1D)"
+                mtf_confluence = False
+            elif price <= ema200_4h and price > ema50_1d:
+                regime = "🟡 Odbicie 1D (Pod EMA200 4H)"
+                mtf_confluence = False
+            else:
+                regime = "🔴 Strukturalny Trend Spadkowy"
+                mtf_confluence = False
 
             data.append({
                 "Lp.": loaded_count + 1,
-                "Token": symbol, "Cena ($)": fmt(price), "24h (%)": round(change_24h, 2), "Reżim Rynkowy": regime,
+                "Token": symbol, "Cena ($)": fmt(price), "24h (%)": round(change_24h, 2), 
+                "Siła vs BTC (24h)": rs_vs_btc_status,
+                "Reżim Rynkowy": regime,
                 "RSI 1H": round(rsi_1h, 1), "RSI 4H": round(rsi_4h, 1), "RSI 1D": round(rsi_1d, 1),
-                "RVOL (4H)": f"{rvol_val}x", "VWAP (4H)": fmt(vwap_val), "OBV Status": obv_status,
-                "MACD Hist (4H)": fmt(macd_hist), "EMA 200 (4H)": fmt(ema200_4h), "SL (ATR)": fmt(sl),
-                "Wsparcie": fmt(support), "Opór": fmt(resistance), "R:R": f"1:{rr_val}",
-                "Price_Raw": float(price), "EMA200_Raw": float(ema200_4h), "Support_Raw": float(support),
-                "Resistance_Raw": float(resistance), "RSI_1H_Raw": float(rsi_1h), "RSI_4H_Raw": float(rsi_4h),
-                "RSI_1D_Raw": float(rsi_1d), "RVOL_Raw": float(rvol_val), "VWAP_Raw": float(vwap_val),
-                "OBV_Raw": obv_status, "Regime_Raw": regime, "Vol_Raw": vol_1h, "Drift_Raw": drift_1h,
+                "RVOL (4H)": f"{rvol_val}x", "VWAP (4H)": fmt(vwap_val), "VWAP +2Std": fmt(vwap_upper_2std),
+                "OBV Status": obv_status,
+                "MACD Hist (4H)": fmt(macd_hist), "EMA 200 (4H)": fmt(ema200_4h), "EMA 50 (1D)": fmt(ema50_1d),
+                "SL (ATR)": fmt(sl), "Wsparcie": fmt(support), "Opór": fmt(resistance), "R:R": f"1:{rr_val}",
+                "Price_Raw": float(price), "EMA200_Raw": float(ema200_4h), "EMA50_1D_Raw": float(ema50_1d),
+                "Support_Raw": float(support), "Resistance_Raw": float(resistance), 
+                "RSI_1H_Raw": float(rsi_1h), "RSI_4H_Raw": float(rsi_4h), "RSI_1D_Raw": float(rsi_1d), 
+                "RVOL_Raw": float(rvol_val), "VWAP_Raw": float(vwap_val), "VWAP_Upper_Raw": float(vwap_upper_2std),
+                "Is_VWAP_Overextended": is_vwap_overextended,
+                "OBV_Raw": obv_status, "Is_OBV_Accumulating": is_obv_accumulating,
+                "Regime_Raw": regime, "MTF_Confluence": mtf_confluence,
+                "Vol_Raw": vol_1h, "Drift_Raw": drift_1h, "RS_BTC_Pct": rs_vs_btc_pct,
                 "Is_Bouncing": float(df_1h["close"].iloc[-1]) >= float(df_1h["open"].iloc[-1]),
                 "ATR_Raw": float(atr)
             })
@@ -336,13 +399,18 @@ def fetch_technical_analysis():
             p, chg = get_simple_coingecko_price(gecko_id)
             data.append({
                 "Lp.": loaded_count + 1,
-                "Token": symbol, "Cena ($)": fmt(p), "24h (%)": round(chg, 2), "Reżim Rynkowy": "Brak danych / Konsolidacja",
+                "Token": symbol, "Cena ($)": fmt(p), "24h (%)": round(chg, 2),
+                "Siła vs BTC (24h)": "➡️ NEUTRALNY",
+                "Reżim Rynkowy": "Konsolidacja",
                 "RSI 1H": 50.0, "RSI 4H": 50.0, "RSI 1D": 50.0, "RVOL (4H)": "1.0x", "VWAP (4H)": fmt(p),
-                "OBV Status": "Neutralny", "MACD Hist (4H)": "0.0", "EMA 200 (4H)": fmt(p), "SL (ATR)": fmt(p * 0.95),
+                "VWAP +2Std": fmt(p * 1.05), "OBV Status": "Neutralny", "MACD Hist (4H)": "0.0", 
+                "EMA 200 (4H)": fmt(p), "EMA 50 (1D)": fmt(p), "SL (ATR)": fmt(p * 0.95),
                 "Wsparcie": fmt(p * 0.95), "Opór": fmt(p * 1.05), "R:R": "1:1.5", "Price_Raw": p, "EMA200_Raw": p,
-                "Support_Raw": p * 0.95, "Resistance_Raw": p * 1.05, "RSI_1H_Raw": 50.0, "RSI_4H_Raw": 50.0,
-                "RSI_1D_Raw": 50.0, "RVOL_Raw": 1.0, "VWAP_Raw": p, "OBV_Raw": "Neutralny", "Regime_Raw": "Konsolidacja",
-                "Vol_Raw": 0.006, "Drift_Raw": 0.0, "Is_Bouncing": False, "ATR_Raw": p * 0.02
+                "EMA50_1D_Raw": p, "Support_Raw": p * 0.95, "Resistance_Raw": p * 1.05, "RSI_1H_Raw": 50.0, 
+                "RSI_4H_Raw": 50.0, "RSI_1D_Raw": 50.0, "RVOL_Raw": 1.0, "VWAP_Raw": p, "VWAP_Upper_Raw": p * 1.05,
+                "Is_VWAP_Overextended": False, "OBV_Raw": "Neutralny", "Is_OBV_Accumulating": False,
+                "Regime_Raw": "Konsolidacja", "MTF_Confluence": False,
+                "Vol_Raw": 0.006, "Drift_Raw": 0.0, "RS_BTC_Pct": 0.0, "Is_Bouncing": False, "ATR_Raw": p * 0.02
             })
             loaded_count += 1
 
@@ -363,41 +431,45 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         vol_1h = float(row.get("Vol_Raw", 0.006))
         drift_1h = float(row.get("Drift_Raw", 0.0))
         regime = row["Regime_Raw"]
+        mtf_confluence = bool(row.get("MTF_Confluence", False))
         rsi_1h = float(row["RSI_1H_Raw"])
         rsi_4h = float(row["RSI_4H_Raw"])
-        obv_status = str(row.get("OBV_Raw", ""))
+        is_obv_acc = bool(row.get("Is_OBV_Accumulating", False))
         rvol = float(row.get("RVOL_Raw", 1.0))
         resistance = float(row.get("Resistance_Raw", price * 1.05))
+        is_vwap_overextended = bool(row.get("Is_VWAP_Overextended", False))
+        rs_btc_pct = float(row.get("RS_BTC_Pct", 0.0))
 
         # Obliczenie wyników Smart Score (0 - 100)
         score = 50.0 
-        if "Silny Trend Wzrostowy" in regime: score += 25.0
-        elif "Korekta" in regime: score += 10.0
+        
+        # 1. Konfluencja MTF (4H + 1D)
+        if mtf_confluence: score += 25.0
+        elif "Wzrost 4H" in regime: score += 10.0
         elif "Spadkowy" in regime: score -= 20.0
 
-        score += (rvol - 1.0) * 20.0  
-        if "Akumulacja" in obv_status: score += 12.0
-        elif "Dystrybucja" in obv_status: score -= 15.0
+        # 2. Siła Względna vs BTC
+        if rs_btc_pct > 2.0: score += 12.0
+        elif rs_btc_pct < -2.0: score -= 10.0
 
+        # 3. RVOL i Wygładzony OBV (EMA10)
+        score += (rvol - 1.0) * 15.0  
+        if is_obv_acc: score += 12.0
+        else: score -= 12.0
+
+        # 4. RSI
         if rsi_4h < 45: score += (45 - rsi_4h) * 0.4
         elif rsi_4h > 65: score -= (rsi_4h - 65) * 0.6
 
         score = max(0.0, min(100.0, score))
 
-        # ----------------------------------------------------
-        # ULEPSZONY SILNIK MONTE CARLO (USPRAWNIENIE DRIFTU I ROZSTRZAŁU)
-        # ----------------------------------------------------
-        # 1. Drift bazowy kotwiczony w Smart Score zamiast w szumie 1H.
-        # Score = 50 -> drift 0%, Score = 100 -> +0.4%/dzień, Score = 0 -> -0.4%/dzień
+        # Monte Carlo (Zbalansowany drift)
         macro_daily_drift = (score - 50.0) / 100.0 * 0.008
         macro_hourly_drift = macro_daily_drift / 24.0
-        
-        # Łączymy trend strukturalny (80%) z wygładzonym szumem 1H (20%)
         target_hourly_drift = (0.8 * macro_hourly_drift) + (0.2 * drift_1h)
 
-        # 2. Tłumienie wybuchu zmienności (wygładzanie w czasie powstrzymujące rozstrzał >40%)
         hours = np.arange(1, 241)
-        dampening = np.power(hours, -0.12)  # Łagodne ściąganie zmienności
+        dampening = np.power(hours, -0.12)
         step_vols = vol_1h * dampening
 
         shocks = rng.normal(loc=0, scale=1.0, size=(5000, 240))
@@ -420,19 +492,24 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         is_altcoin = symbol not in ["BTC", "ETH"]
         macro_headwind = btc_dom > 59.0 and is_altcoin
 
-        is_overextended = (rsi_1h > 65.0) or (price >= resistance * 0.99)
+        is_overextended = (rsi_1h > 65.0) or (price >= resistance * 0.99) or is_vwap_overextended
 
+        # Filtry Wejścia w Pozycję
         if macro_headwind: 
             signal = "⏳ ODRZUCONY (Silna dominacja BTC)"
+        elif is_vwap_overextended:
+            signal = "❌ ODRZUCONY (Przegrzany przy Wstędze VWAP +2 Std)"
         elif is_overextended: 
             signal = "❌ ODRZUCONY (Przegrzany – Unikamy szczytu)"
-        elif score >= min_score_filter and rsi_4h <= max_rsi_filter:
-            if req_accumulation and "Akumulacja" not in obv_status: signal = "🟡 NEUTRALNY (Brak akumulacji)"
-            else: signal = "🟢 WYSOKI EDGE (Solidna Okazja Zakupowa)"
+        elif score >= min_score_filter and rsi_4h <= max_rsi_filter and mtf_confluence:
+            if req_accumulation and not is_obv_acc: 
+                signal = "🟡 NEUTRALNY (Brak akumulacji OBV > EMA10)"
+            else: 
+                signal = "🟢 WYSOKI EDGE (Solidna Okazja Zakupowa)"
         elif score >= 55.0: 
             signal = "🟡 NEUTRALNY (Wymaga obserwacji)"
         else: 
-            signal = "❌ ODRZUCONY (Słaba struktura/podaż)"
+            signal = "❌ ODRZUCONY (Słaba struktura MTF/OBV)"
 
         return pd.Series([
             f"${fmt(p_24h)}", f"${fmt(p_3d)}", f"${fmt(p_10d)}",
@@ -585,8 +662,8 @@ def aktualizuj_i_rozlicz_pozycje(df_ta):
 def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     symbol = row_ta.get("Token", "UNKNOWN")
     price_raw = float(row_ta.get("Price_Raw", 0))
-    ema_raw = float(row_ta.get("EMA200_Raw", 0))
-    atr_raw = float(row_ta.get("ATR_Raw", price_raw * 0.02))
+    ema200_raw = float(row_ta.get("EMA200_Raw", 0))
+    ema50_1d_raw = float(row_ta.get("EMA50_1D_Raw", 0))
     regime = row_ta.get("Reżim Rynkowy", "Neutralny")
     
     rsi_1h = float(row_ta.get("RSI_1H_Raw", 50))
@@ -595,7 +672,10 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     
     rvol_str = str(row_ta.get("RVOL (4H)", "1.0x"))
     vwap_val = float(row_ta.get("VWAP_Raw", price_raw))
+    vwap_upper = float(row_ta.get("VWAP_Upper_Raw", price_raw * 1.05))
+    is_vwap_overextended = bool(row_ta.get("Is_VWAP_Overextended", False))
     obv_status = row_ta.get("OBV Status", "Neutralny")
+    rs_btc_status = str(row_ta.get("Siła vs BTC (24h)", "Neutralny"))
     macd_hist = float(row_ta.get("MACD Hist (4H)", 0.0))
     
     support_str = row_ta.get("Wsparcie", "0.00")
@@ -610,37 +690,26 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     
     target_tp1 = price_raw * 1.06
 
-    if "Silny Trend" in regime: 
-        pa_desc = f"Aktywo znajduje się w wyraźnym trendzie wzrostowym, notując cenę powyżej kluczowej, 200-okresowej średniej kroczącej (EMA200: `{fmt(ema_raw)} $`). Świadczy to o długoterminowej kontroli popytu i stanowi solidne tło do rozgrywania pozycji długich."
-    elif "Korekta" in regime: 
-        pa_desc = f"Obserwujemy lokalne schłodzenie kursu, jednak cena skutecznie broni obszaru wsparcia powyżej EMA200 (`{fmt(ema_raw)} $`). Taki układ jest klasyfikowany jako zdrowa korekta w trendzie wzrostowym, dając szansę na optymalizację ceny wejścia."
-    elif "Spadkowy" in regime: 
-        pa_desc = f"Rynek znajduje się pod widoczną presją podaży, a cena porusza się poniżej długoterminowej EMA200 (`{fmt(ema_raw)} $`). Struktura ta definiuje strukturalny trend spadkowy, co znacząco zwiększa ryzyko dla pozycji typu long."
-    else: 
-        pa_desc = f"Aktywo porusza się w fazie horyzontalnej konsolidacji, oscylując w pobliżu EMA200 (`{fmt(ema_raw)} $`). Brak wyraźnego kierunku rynkowego sugeruje trwającą walkę popytu z podażą – zalecana jest ostrożność do momentu ostatecznego wybicia."
+    pa_desc = f"Aktywo wykazuje reżim: **{regime}**. Cena wynosi `{fmt(price_raw)} $` i jest weryfikowana na dwóch interwałach (EMA200 4H: `{fmt(ema200_raw)} $` | EMA50 1D: `{fmt(ema50_1d_raw)} $`). " + ("Trwała konfluencja obu średnich potwierdza strukturalną przewagę popytu." if "Silny Trend" in regime else "Brak pełnej konfluencji sugeruje ryzyko lokalnego oporu lub kontrtrendu.")
 
-    btc_dom_desc = f"Wskaźnik dominacji Bitcoina (obecnie na poziomie `{btc_dom}%`) określa, jaka część kapitału kryptowalutowego znajduje się w BTC. " + ("Obecny wysoki poziom wysysa płynność z altcoinów, utrudniając im niezależne wzrosty." if btc_dom > 59.0 else "Obecny umiarkowany/spadkowy trend dominacji sprzyja rotacji kapitału, stwarzając dobre środowisko dla ruchów na altcoinach.")
+    btc_dom_desc = f"Dominacja BTC wynosząca `{btc_dom}%` wyznacza klimat rynkowy. " + (f"Status Siły Względnej dla {symbol} w relacji do Bitcoina: `{rs_btc_status}`." )
 
     rvol_float = float(rvol_str.replace("x", "")) if "x" in rvol_str else 1.0
-    if rvol_float >= 1.5:
-        rvol_desc = f"**RVOL (Względny Wolumen):** Wskaźnik wynosi `{rvol_str}`. Znacznie podwyższony wolumen sugeruje ponadprzeciętne zaangażowanie kapitału (ślad tzw. Smart Money), co uwiarygadnia siłę obecnego ruchu cenowego."
-    elif rvol_float <= 0.7:
-        rvol_desc = f"**RVOL (Względny Wolumen):** Wskaźnik wynosi `{rvol_str}`. Niski wolumen obrotu wskazuje na apatię rynkową. Ruchy w takim środowisku bywają przypadkowe i wysoce podatne na fałszywe wybicia (fakeouts)."
-    else:
-        rvol_desc = f"**RVOL (Względny Wolumen):** Wskaźnik wynosi `{rvol_str}`. Wolumen utrzymuje się w standardowych granicach, oznaczając typową płynność bez anomalnych interwencji dużego kapitału."
+    rvol_desc = f"**RVOL (Względny Wolumen):** `{rvol_str}`. " + ("Wyraźna anomalia obrotu wskazująca na Smart Money." if rvol_float >= 1.5 else "Standardowy obrót rynkowy.")
 
-    vwap_desc = f"**VWAP (Cena Ważona Wolumenem):** Wynosi `{fmt(vwap_val)} $`. Jest to średnia cena akceptowana przez większość kapitału w danej sesji. Cena bieżąca znajdująca się {'powyżej' if price_raw > vwap_val else 'poniżej'} VWAP wskazuje na śróddzienną przewagę {'kupujących' if price_raw > vwap_val else 'sprzedających'}."
-    obv_desc = f"**OBV (Skumulowany Wolumen):** Odczyt to `{obv_status}`. Wskaźnik On-Balance Volume śledzi, czy kapitał wpływa do aktywa, czy z niego ucieka. Obecny stan sugeruje {'systematyczne skupywanie waloru (akumulację)' if 'Akumulacja' in obv_status else 'realizację zysków przez duże portfele (dystrybucję)' if 'Dystrybucja' in obv_status else 'równowagę sił bez widocznej akumulacji'}."
+    vwap_desc = f"**VWAP i Wstęgi Odchylenia (+2 Std):** Główna linia VWAP leży przy `{fmt(vwap_val)} $`, a górna wstęga +2 Std przy `{fmt(vwap_upper)} $`. " + ("⚠️ **Ostrzeżenie:** Cena dotknęła lub przebiła górną wstęgę +2 Std – wysokie ryzyko ściągnięcia do średniej (Mean Reversion)." if is_vwap_overextended else "Cena znajduje się bezpiecznie poniżej górnej wstęgi +2 Std.")
+    
+    obv_desc = f"**Wygładzony OBV (z EMA10):** Odczyt to `{obv_status}`. Nałożenie 10-okresowej EMA wyeliminowało pojedynczy szum – linia OBV utrzymująca się nad średnią potwierdza autentyczny napływ kapitału."
 
-    rsi_desc = f"**RSI (Wskaźnik Siły Względnej):** Zestawienie wieloramowe (1H: `{round(rsi_1h, 1)}` | 4H: `{round(rsi_4h, 1)}` | 1D: `{round(rsi_1d, 1)}`). RSI określa potencjalne wyczerpanie pędu ceny. Rynek krótkoterminowo (1H-4H) wydaje się być {'przegrzany (ryzyko korekty)' if rsi_4h > 65 else 'wyprzedany (przestrzeń do odbicia)' if rsi_4h < 40 else 'w neutralnej strefie równowagi'}."
-    macd_desc = f"**MACD Histogram (4H):** Wynosi `{fmt(macd_hist)}`. Histogram obrazuje różnicę między krótko- i długoterminowym pędem. Wartość {'dodatnia potwierdza narastające momentum prowzrostowe' if macd_hist > 0 else 'ujemna ostrzega o przewadze impetu spadkowego'}. Zmiana kierunku histogramu to często najwcześniejszy sygnał obrotu."
+    rsi_desc = f"**RSI MTF:** 1H (`{round(rsi_1h, 1)}`), 4H (`{round(rsi_4h, 1)}`), 1D (`{round(rsi_1d, 1)}`)."
+    macd_desc = f"**MACD Histogram (4H):** `{fmt(macd_hist)}`."
 
     if "WYSOKI EDGE" in edge_status: 
-        final_reco = "🟢 **REKOMENDACJA:** Zdecydowane zezwolenie na handel. Aktywo spełnia rygorystyczne kryteria algorytmu, łącząc asymetryczny potencjał zysku do ryzyka z solidnym wsparciem wskaźników płynności (Smart Money)."
+        final_reco = "🟢 **REKOMENDACJA:** Zdecydowane zezwolenie na handel. Aktywo spełnia rygorystyczne kryteria algorytmu (Konfluencja 4H+1D, Wygładzony OBV, bezpieczny VWAP)."
     elif "NEUTRALNY" in edge_status: 
-        final_reco = "🟡 **REKOMENDACJA:** Obserwacja. Brak pełnej konfluencji wskaźników. Zależnie od apetytu na ryzyko, należy poczekać na dogodniejszą strefę wejścia lub silniejsze potwierdzenie wolumenowe."
+        final_reco = "🟡 **REKOMENDACJA:** Obserwacja. Brak pełnej konfluencji MTF lub wygładzonego sygnału akumulacji OBV."
     else: 
-        final_reco = "❌ **REKOMENDACJA:** Odrzucenie sygnału. Kondycja techniczna faworyzuje stronę podażową. Ryzyko spadków lub uwięzienia kapitału w przedłużającej się konsolidacji jest zbyt wysokie."
+        final_reco = "❌ **REKOMENDACJA:** Odrzucenie sygnału. Ryzyko odrzucenia na wstędze VWAP, braku wsparcia EMA lub słabości w relacji do BTC."
 
     return f"""
 ### 🎯 EKSPERCKA SYNTEZA MTF PRO: {symbol}
@@ -648,35 +717,30 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
 
 ---
 #### 1. 🧠 Analiza Strukturalna i Makro
-*Sekcja bada ogólny trend rynkowy i ocenia, czy kierunek przepływu kapitału sprzyja wybranemu aktywu.*
-* **Kondycja Trendu (Price Action vs EMA200):** {pa_desc}
-* **Otoczenie Makro (Dominacja BTC):** {btc_dom_desc}
+* **Konfluencja Trendów (4H EMA200 & 1D EMA50):** {pa_desc}
+* **Siła Względna i Dominacja BTC:** {btc_dom_desc}
 
-#### 2. 📊 Płynność i Ślady Smart Money
-*Analiza aktywności dużych graczy na podstawie zachowania wolumenu transakcyjnego.*
+#### 2. 📊 Płynność, Wstęgi VWAP i Smart Money
 * {rvol_desc}
 * {vwap_desc}
 * {obv_desc}
 
 #### 3. 📈 Wskaźniki Pędu (Momentum)
-*Weryfikacja wewnętrznej siły trendu oraz detekcja wczesnych punktów zwrotnych (wykupienie/wyprzedanie).*
 * {rsi_desc}
 * {macd_desc}
 
-#### 4. 🎲 Symulacja Monte Carlo
-*Modelowanie tysięcy potencjalnych ścieżek cenowych z wykorzystaniem historycznej zmienności.*
-* **Mediana prognozy (Cel za 10 dni):** `{prognoza_10d}` (Prawdopodobieństwo wzrostu wyceniono na `{prob_up_10d}`).
-* **Przedział ufności 95% (Zasięg 10-dniowy):** `{zasieg_mc_10d}` – Statystycznie cena powinna utrzymać się w tym zakresie przez najbliższe 10 dni.
+#### 4. 🎲 Symulacja Monte Carlo (10 Dni)
+* **Mediana prognozy:** `{prognoza_10d}` (Prawdopodobieństwo wzrostu: `{prob_up_10d}`).
+* **Przedział ufności 95%:** `{zasieg_mc_10d}`.
 
 #### 5. 🛡️ Inżynieria Ryzyka
-*Defensywna ocena parametrów wyjścia z pozycji, chroniąca kapitał przed rynkowym szumem.*
-* **Architektura Ceny:** Aktualne lokalne wsparcie znajduje się przy **{support_str}**, podczas gdy opór powstrzymujący wzrosty to **{resistance_str}**.
-* **Dynamiczny Stop Loss (ATR):** Poziom wyjścia awaryjnego ustalony jest na **{sl_str}**.
-* **Cel Taktyczny (TP1: +6% Zysku):** `{fmt(target_tp1)} $`
+* **Wsparcie:** `{support_str}` | **Opór:** `{resistance_str}`
+* **Stop Loss (ATR):** `{sl_str}`
+* **Cel Taktyczny (TP1 +6%):** `{fmt(target_tp1)} $`
 
 ---
 #### 📝 PODSUMOWANIE ANALIZY
-Syntetyczna ocena (Smart Score) wynosząca **{smart_score}%** plasuje obecną formację w reżimie: **{regime}**. 
+Syntetyczny wynik **Smart Score: {smart_score}%** dla reżimu **{regime}**. 
 
 {final_reco}
 """
@@ -710,7 +774,7 @@ if not df_ml.empty:
                 score_val = float(row['Smart Score (%)'])
                 st.success(f"**{row['Token']}**\n\nCena: `{row['Cena ($)']}`\nSmart Score: **{score_val:.2f}%**\nPrognoza 10D: **{row['Prognoza 10D']}**")
     else:
-        st.info("Obecnie żaden token nie spełnia restrykcyjnych warunków algorytmu (odfiltrowano przegrzane aktywa).")
+        st.info("Obecnie żaden token nie spełnia restrykcyjnych warunków algorytmu (odfiltrowano przegrzane aktywa oraz brak konfluencji MTF/OBV).")
 
 st.markdown("---")
 
@@ -718,7 +782,7 @@ if st.button("🔄 Odśwież dane", type="primary"):
     st.cache_data.clear()
     st.rerun()
 
-df_ta_clean = df_ta.drop(columns=["Price_Raw", "EMA200_Raw", "Support_Raw", "Resistance_Raw", "RSI_1H_Raw", "RSI_4H_Raw", "RSI_1D_Raw", "RVOL_Raw", "VWAP_Raw", "OBV_Raw", "Regime_Raw", "Vol_Raw", "Drift_Raw", "Is_Bouncing", "ATR_Raw"], errors="ignore")
+df_ta_clean = df_ta.drop(columns=["Price_Raw", "EMA200_Raw", "EMA50_1D_Raw", "Support_Raw", "Resistance_Raw", "RSI_1H_Raw", "RSI_4H_Raw", "RSI_1D_Raw", "RVOL_Raw", "VWAP_Raw", "VWAP_Upper_Raw", "Is_VWAP_Overextended", "OBV_Raw", "Is_OBV_Accumulating", "Regime_Raw", "MTF_Confluence", "Vol_Raw", "Drift_Raw", "RS_BTC_Pct", "Is_Bouncing", "ATR_Raw"], errors="ignore")
 if "Atrakcyjność (%)" not in df_ta_clean.columns and not df_ml.empty: df_ta_clean["Atrakcyjność (%)"] = df_ml["Smart Score (%)"]
 
 df_ml_widok = df_ml.drop(columns=["Prognoza_10D_Raw"], errors="ignore") if not df_ml.empty else df_ml
