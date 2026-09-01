@@ -68,7 +68,7 @@ if not check_password():
 with st.sidebar:
     st.subheader("⚙️ Narzędzia i Zarządzanie")
     HISTORY_FILE = "signals_history.csv"
-    
+
     if st.button("🗑️ Resetuj historię i zacznij od nowa", type="secondary"):
         if os.path.exists(HISTORY_FILE):
             try:
@@ -79,12 +79,12 @@ with st.sidebar:
             del st.session_state[key]
         st.success("Wyczyszczono historię i stan aplikacji!")
         st.rerun()
-    
+
     st.divider()
-    
+
     st.subheader("🎛️ Parametry Algorytmu (Smart Score)")
     st.caption("Dostosuj restrykcyjność sygnałów zakupowych")
-    
+
     min_smart_score = st.slider(
         "Minimalny Smart Score (%)", min_value=0.0, max_value=100.0, value=65.0, step=1.0,
         help="Im wyższy wynik, tym silniejszy trend i lepsze parametry wolumenu."
@@ -99,24 +99,24 @@ with st.sidebar:
     )
 
 # ==========================================
-# LISTA TOKENÓW SPOT (COINBASE / GECKO)
+# LISTA TOKENÓW SPOT (COINBASE / GECKO) + MAPA BINANCE FUTURES
 # ==========================================
 TOKENS = [
-    {"symbol": "ONDO", "coinbase": "ONDO-USD", "gecko_id": "ondo-finance"},
-    {"symbol": "INJ", "coinbase": "INJ-USD", "gecko_id": "injective-protocol"},
-    {"symbol": "LINK", "coinbase": "LINK-USD", "gecko_id": "chainlink"},
-    {"symbol": "RENDER", "coinbase": "RENDER-USD", "gecko_id": "render-token"},
-    {"symbol": "FET", "coinbase": "FET-USD", "gecko_id": "artificial-superintelligence-alliance"},
-    {"symbol": "BTC", "coinbase": "BTC-USD", "gecko_id": "bitcoin"},
-    {"symbol": "ETH", "coinbase": "ETH-USD", "gecko_id": "ethereum"},
-    {"symbol": "ENA", "coinbase": "ENA-USD", "gecko_id": "ethena"},
-    {"symbol": "PENDLE", "coinbase": "PENDLE-USD", "gecko_id": "pendle"},
-    {"symbol": "NEAR", "coinbase": "NEAR-USD", "gecko_id": "near"},
-    {"symbol": "PLUME", "coinbase": "PLUME-USD", "gecko_id": "plume"},
-    {"symbol": "JUP", "coinbase": None, "gecko_id": "jupiter-exchange-solana"},
-    {"symbol": "UNI", "coinbase": "UNI-USD", "gecko_id": "uniswap"},
-    {"symbol": "SEI", "coinbase": "SEI-USD", "gecko_id": "sei-network"},
-    {"symbol": "SOL", "coinbase": "SOL-USD", "gecko_id": "solana"},
+    {"symbol": "ONDO", "coinbase": "ONDO-USD", "gecko_id": "ondo-finance", "binance_futures": "ONDOUSDT"},
+    {"symbol": "INJ", "coinbase": "INJ-USD", "gecko_id": "injective-protocol", "binance_futures": "INJUSDT"},
+    {"symbol": "LINK", "coinbase": "LINK-USD", "gecko_id": "chainlink", "binance_futures": "LINKUSDT"},
+    {"symbol": "RENDER", "coinbase": "RENDER-USD", "gecko_id": "render-token", "binance_futures": "RENDERUSDT"},
+    {"symbol": "FET", "coinbase": "FET-USD", "gecko_id": "artificial-superintelligence-alliance", "binance_futures": "FETUSDT"},
+    {"symbol": "BTC", "coinbase": "BTC-USD", "gecko_id": "bitcoin", "binance_futures": "BTCUSDT"},
+    {"symbol": "ETH", "coinbase": "ETH-USD", "gecko_id": "ethereum", "binance_futures": "ETHUSDT"},
+    {"symbol": "ENA", "coinbase": "ENA-USD", "gecko_id": "ethena", "binance_futures": "ENAUSDT"},
+    {"symbol": "PENDLE", "coinbase": "PENDLE-USD", "gecko_id": "pendle", "binance_futures": "PENDLEUSDT"},
+    {"symbol": "NEAR", "coinbase": "NEAR-USD", "gecko_id": "near", "binance_futures": "NEARUSDT"},
+    {"symbol": "PLUME", "coinbase": "PLUME-USD", "gecko_id": "plume", "binance_futures": None},
+    {"symbol": "JUP", "coinbase": None, "gecko_id": "jupiter-exchange-solana", "binance_futures": "JUPUSDT"},
+    {"symbol": "UNI", "coinbase": "UNI-USD", "gecko_id": "uniswap", "binance_futures": "UNIUSDT"},
+    {"symbol": "SEI", "coinbase": "SEI-USD", "gecko_id": "sei-network", "binance_futures": "SEIUSDT"},
+    {"symbol": "SOL", "coinbase": "SOL-USD", "gecko_id": "solana", "binance_futures": "SOLUSDT"},
 ]
 
 def fmt(val):
@@ -203,6 +203,31 @@ def get_simple_coingecko_price(gecko_id):
         pass
     return 1.0, 0.0
 
+def get_funding_rate_and_oi(binance_symbol):
+    """Pobiera Funding Rate i Open Interest z publicznego API Binance Futures (bez klucza)."""
+    if not binance_symbol:
+        return None, None
+    try:
+        url = "https://fapi.binance.com/fapi/v1/premiumIndex"
+        res = requests.get(url, params={"symbol": binance_symbol}, headers={"User-Agent": "CryptoDashboard/1.0"}, timeout=4)
+        if res.status_code != 200:
+            return None, None
+        data = res.json()
+        funding_rate = float(data.get("lastFundingRate", 0.0)) * 100.0
+
+        oi_val = None
+        try:
+            oi_url = "https://fapi.binance.com/fapi/v1/openInterest"
+            oi_res = requests.get(oi_url, params={"symbol": binance_symbol}, headers={"User-Agent": "CryptoDashboard/1.0"}, timeout=4)
+            if oi_res.status_code == 200:
+                oi_val = float(oi_res.json().get("openInterest", 0.0))
+        except Exception:
+            oi_val = None
+
+        return round(funding_rate, 4), oi_val
+    except Exception:
+        return None, None
+
 def get_candles_1h(token_info):
     if token_info.get("coinbase"):
         try:
@@ -225,13 +250,18 @@ def resample_ohlc(df_1h, rule):
     df.set_index("dt", inplace=True)
     return df.resample(rule).agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna().reset_index()
 
+# [POPRAWKA] RSI Z PRAWDZIWYM WYGŁADZANIEM WILDERA (EMA, alpha=1/period)
+# Poprzednia wersja liczyła RSI z pojedynczego rolling-mean w ostatnim punkcie,
+# co dawało szarpane, mało stabilne odczyty. Wygładzanie Wildera jest standardem
+# rynkowym i daje płynniejszy, mniej podatny na szum wynik.
 def calc_rsi(series, period=14):
     if len(series) < period + 1:
         return 50.0
     delta = series.diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = (-delta.clip(upper=0)).rolling(period).mean()
-    val = 100 - (100 / (1 + (gain.iloc[-1] / (loss.iloc[-1] + 1e-9))))
+    gain = delta.clip(lower=0).ewm(alpha=1/period, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1/period, adjust=False).mean()
+    rs = gain.iloc[-1] / (loss.iloc[-1] + 1e-9)
+    val = 100 - (100 / (1 + rs))
     return float(val) if not pd.isna(val) else 50.0
 
 def calc_macd(series, span1=12, span2=26, signal=9):
@@ -241,24 +271,86 @@ def calc_macd(series, span1=12, span2=26, signal=9):
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     return float(macd_line.iloc[-1]), float(signal_line.iloc[-1]), float((macd_line - signal_line).iloc[-1])
 
+# [NOWOŚĆ] ADX / +DI / -DI — SIŁA TRENDU (niezależna od jego kierunku)
+def calc_adx(df, period=14):
+    if len(df) < period + 2:
+        return 20.0, "😴 Brak Trendu (Konsolidacja)"
+    high, low, close = df["high"], df["low"], df["close"]
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs()
+    ], axis=1).max(axis=1)
+
+    atr_w = tr.ewm(alpha=1/period, adjust=False).mean()
+    plus_di = 100 * pd.Series(plus_dm, index=df.index).ewm(alpha=1/period, adjust=False).mean() / (atr_w + 1e-9)
+    minus_di = 100 * pd.Series(minus_dm, index=df.index).ewm(alpha=1/period, adjust=False).mean() / (atr_w + 1e-9)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
+    adx = dx.ewm(alpha=1/period, adjust=False).mean()
+
+    adx_val = float(adx.iloc[-1]) if not pd.isna(adx.iloc[-1]) else 20.0
+    if adx_val >= 25:
+        strength = "💪 Silny Trend"
+    elif adx_val >= 20:
+        strength = "🟡 Umiarkowany Trend"
+    else:
+        strength = "😴 Brak Trendu (Konsolidacja)"
+    return round(adx_val, 1), strength
+
+# [NOWOŚĆ] WSTĘGI BOLLINGERA (20, 2 STD) — DRUGIE (obok VWAP) NARZĘDZIE DO ŁAPANIA PRZEGRZANIA
+def calc_bollinger(series, period=20, num_std=2.0):
+    if len(series) < period:
+        p = float(series.iloc[-1]) if len(series) > 0 else 0.0
+        return p, p, p, 50.0
+    sma = series.rolling(period).mean()
+    std = series.rolling(period).std()
+    upper = sma + num_std * std
+    lower = sma - num_std * std
+    curr = float(series.iloc[-1])
+    u = float(upper.iloc[-1]) if not pd.isna(upper.iloc[-1]) else curr
+    l = float(lower.iloc[-1]) if not pd.isna(lower.iloc[-1]) else curr
+    m = float(sma.iloc[-1]) if not pd.isna(sma.iloc[-1]) else curr
+    percent_b = ((curr - l) / (u - l + 1e-9)) * 100
+    return m, u, l, round(percent_b, 1)
+
+# [NOWOŚĆ] KORELACJA Z BTC (na zwrotach godzinowych, okno dopasowane do okna Siły Względnej)
+def calc_btc_correlation(token_closes, btc_closes, window=72):
+    try:
+        min_len = min(len(token_closes), len(btc_closes))
+        if min_len < 10:
+            return 0.0
+        t = token_closes.iloc[-min_len:].reset_index(drop=True)
+        b = btc_closes.iloc[-min_len:].reset_index(drop=True)
+        t_ret = t.pct_change().dropna()
+        b_ret = b.pct_change().dropna()
+        lookback = min(window, len(t_ret))
+        corr = t_ret.tail(lookback).corr(b_ret.tail(lookback))
+        return round(float(corr), 2) if not pd.isna(corr) else 0.0
+    except Exception:
+        return 0.0
+
 # [POPRAWKA 1] ROLLING 7-DAY VWAP (168 GODZIN) Z WSTĘGĄ +2 STD
 def calc_vwap_rolling_7d(df_1h):
     if df_1h.empty or "volume" not in df_1h.columns or df_1h["volume"].sum() == 0:
         p = float(df_1h["close"].iloc[-1]) if not df_1h.empty else 1.0
         return p, p * 1.05, False
-    
+
     df_7d = df_1h.tail(168).copy()
     typical_price = (df_7d["high"] + df_7d["low"] + df_7d["close"]) / 3
     cum_vol = df_7d["volume"].cumsum()
     vwap = (typical_price * df_7d["volume"]).cumsum() / (cum_vol + 1e-9)
-    
+
     variance = ((typical_price - vwap) ** 2 * df_7d["volume"]).cumsum() / (cum_vol + 1e-9)
     std_dev = np.sqrt(variance)
-    
+
     vwap_val = float(vwap.iloc[-1])
     upper_band_2std = vwap_val + (2.0 * float(std_dev.iloc[-1]))
     curr_price = float(df_7d["close"].iloc[-1])
-    
+
     is_overextended = curr_price >= upper_band_2std
     return vwap_val, upper_band_2std, is_overextended
 
@@ -269,13 +361,13 @@ def calc_smoothed_obv(df_4h):
     direction = np.sign(df_4h["close"].diff()).fillna(0)
     obv = (direction * df_4h["volume"]).cumsum()
     obv_ema10 = obv.ewm(span=10, adjust=False).mean()
-    
+
     curr_obv = float(obv.iloc[-1])
     curr_ema = float(obv_ema10.iloc[-1])
-    
+
     diff_pct = ((curr_obv - curr_ema) / (abs(curr_ema) + 1e-9)) * 100
     is_accumulating = diff_pct > 0
-    
+
     if is_accumulating:
         status = f"🟢 Akumulacja (+{diff_pct:.2f}%)"
     else:
@@ -293,6 +385,7 @@ def calc_rvol(df, period=20):
 def fetch_technical_analysis():
     data = []
     loaded_count = 0
+    fallback_tokens = []  # [NOWOŚĆ] śledzenie tokenów działających na danych zastępczych
     fng_val, fng_class = get_fear_and_greed()
     btc_dom = get_global_market_data()
     alt_season = calculate_altcoin_season_index()
@@ -307,7 +400,7 @@ def fetch_technical_analysis():
         try:
             df_1h = get_candles_1h(item)
             if df_1h.empty or len(df_1h) < 5: raise ValueError("Brak świec")
-            
+
             df_4h = resample_ohlc(df_1h, "4h")
             df_1d = resample_ohlc(df_1h, "1d") if len(df_1h) >= 24 else get_candles_1d(item)
             df_3d = resample_ohlc(df_1h, "3d") if len(df_1h) >= 72 else df_1d
@@ -320,6 +413,7 @@ def fetch_technical_analysis():
             if symbol == "BTC":
                 rs_vs_btc_pct = 0.0
                 rs_vs_btc_status = "➡️ BAZA (Bitcoin)"
+                btc_corr = 1.0
             else:
                 min_len = min(len(df_1h["close"]), len(btc_closes_1h))
                 token_closes = df_1h["close"].iloc[-min_len:].reset_index(drop=True)
@@ -330,32 +424,48 @@ def fetch_technical_analysis():
                 ratio_72h = ratio.iloc[-lookback] if lookback > 0 else ratio.iloc[0]
                 rs_vs_btc_pct = float(((ratio_now - ratio_72h) / (ratio_72h + 1e-9)) * 100)
                 rs_vs_btc_status = f"🟢 OUTPERFORM (+{rs_vs_btc_pct:.2f}%)" if rs_vs_btc_pct > 0 else f"🔴 UNDERPERFORM ({rs_vs_btc_pct:.2f}%)"
+                btc_corr = calc_btc_correlation(token_closes, btc_closes, window=72)
 
             log_returns = np.log(df_1h["close"] / df_1h["close"].shift(1)).dropna()
-            
+
             raw_vol_1h = float(log_returns.std()) if len(log_returns) > 5 else 0.008
             vol_1h = float(np.clip(raw_vol_1h, 0.003, 0.008))
-            
+
             raw_drift = float(log_returns.mean()) if len(log_returns) > 5 else 0.0
             drift_1h = float(np.clip(raw_drift, -0.0003, 0.0003))
 
-            # [POPRAWKA 4] TRIADA RSI: 4H / 1D / 3D
+            # [POPRAWKA 4] TRIADA RSI: 4H / 1D / 3D (teraz z wygładzaniem Wildera)
             rsi_4h = calc_rsi(df_4h["close"]) if len(df_4h) >= 14 else 50.0
             rsi_1d = calc_rsi(df_1d["close"]) if len(df_1d) >= 14 else 50.0
             rsi_3d = calc_rsi(df_3d["close"]) if len(df_3d) >= 14 else rsi_1d
 
             _, _, macd_hist = calc_macd(df_4h["close"]) if len(df_4h) >= 26 else (0.0, 0.0, 0.0)
-            
+
             # ROLLING 7D VWAP
             vwap_val, vwap_upper_2std, is_vwap_overextended = calc_vwap_rolling_7d(df_1h)
-            
+
             # OBV ODCHYLENIE PROCENTOWE
             obv_status, obv_diff_pct, is_obv_accumulating = calc_smoothed_obv(df_4h)
             rvol_val = calc_rvol(df_4h)
 
+            # [NOWOŚĆ] ADX (SIŁA TRENDU) NA 4H
+            adx_val, adx_strength = calc_adx(df_4h)
+
+            # [NOWOŚĆ] BOLLINGER BANDS NA 4H
+            bb_mid, bb_upper, bb_lower, percent_b = calc_bollinger(df_4h["close"])
+
+            # [NOWOŚĆ] FUNDING RATE I OPEN INTEREST (BINANCE FUTURES)
+            funding_rate, open_interest = get_funding_rate_and_oi(item.get("binance_futures"))
+
             tr = pd.concat([df_4h["high"] - df_4h["low"], (df_4h["high"] - df_4h["close"].shift()).abs(), (df_4h["low"] - df_4h["close"].shift()).abs()], axis=1).max(axis=1) if len(df_4h) > 1 else pd.Series([price * 0.02])
-            atr = float(tr.rolling(min(14, len(df_4h))).mean().iloc[-1]) if len(tr) > 0 else price * 0.02
-            
+            atr_series = tr.rolling(min(14, len(df_4h))).mean().dropna()
+            atr = float(atr_series.iloc[-1]) if not atr_series.empty else price * 0.02
+            # [NOWOŚĆ] PERCENTYL OBECNEJ ZMIENNOŚCI (ATR) NA TLE DOSTĘPNEJ HISTORII
+            if len(atr_series) >= 5:
+                atr_percentile = float((atr_series <= atr_series.iloc[-1]).mean() * 100)
+            else:
+                atr_percentile = 50.0
+
             ema200_4h = float(df_4h["close"].ewm(span=min(200, len(df_4h)), adjust=False).mean().iloc[-1]) if len(df_4h) > 0 else price
             ema50_1d = float(df_1d["close"].ewm(span=min(50, len(df_1d)), adjust=False).mean().iloc[-1]) if len(df_1d) >= 50 else (price * 0.98)
 
@@ -382,31 +492,42 @@ def fetch_technical_analysis():
 
             data.append({
                 "Lp.": loaded_count + 1,
-                "Token": symbol, "Cena ($)": fmt(price), "24h (%)": round(change_24h, 2), 
+                "Token": symbol, "Cena ($)": fmt(price), "24h (%)": round(change_24h, 2),
                 "Reżim Rynkowy": regime,
                 "EMA 200 (4H)": fmt(ema200_4h), "EMA 50 (1D)": fmt(ema50_1d),
                 "Siła vs BTC (72h)": rs_vs_btc_status,
                 "Wsparcie": fmt(support), "Opór": fmt(resistance), "SL (ATR)": fmt(sl), "R:R": f"1:{rr_val}",
-                
+
                 # Zmienne do Zakładki 2
                 "RSI 4H": round(rsi_4h, 1), "RSI 1D": round(rsi_1d, 1), "RSI 3D": round(rsi_3d, 1),
                 "RVOL (4H)": f"{rvol_val}x", "VWAP 7D": fmt(vwap_val), "VWAP +2Std": fmt(vwap_upper_2std),
                 "OBV Status": obv_status, "OBV Odchylenie (%)": obv_diff_pct,
                 "MACD Hist (4H)": fmt(macd_hist),
-                
+                "ADX (4H)": adx_val, "Siła Trendu": adx_strength,
+                "%B (Boll)": percent_b,
+                "Funding (%)": funding_rate if funding_rate is not None else "-",
+                "Open Interest": fmt(open_interest) if open_interest is not None else "-",
+                "Korelacja BTC (72h)": btc_corr,
+
                 # Dane Surowe (Pola Pomocnicze)
                 "Price_Raw": float(price), "EMA200_Raw": float(ema200_4h), "EMA50_1D_Raw": float(ema50_1d),
-                "Support_Raw": float(support), "Resistance_Raw": float(resistance), 
-                "RSI_4H_Raw": float(rsi_4h), "RSI_1D_Raw": float(rsi_1d), "RSI_3D_Raw": float(rsi_3d), 
+                "Support_Raw": float(support), "Resistance_Raw": float(resistance),
+                "RSI_4H_Raw": float(rsi_4h), "RSI_1D_Raw": float(rsi_1d), "RSI_3D_Raw": float(rsi_3d),
                 "RVOL_Raw": float(rvol_val), "VWAP_Raw": float(vwap_val), "VWAP_Upper_Raw": float(vwap_upper_2std),
                 "Is_VWAP_Overextended": is_vwap_overextended,
                 "OBV_Raw": obv_status, "OBV_Diff_Pct": obv_diff_pct, "Is_OBV_Accumulating": is_obv_accumulating,
                 "Regime_Raw": regime, "MTF_Confluence": mtf_confluence,
                 "Vol_Raw": vol_1h, "Drift_Raw": drift_1h, "RS_BTC_Pct": rs_vs_btc_pct,
-                "ATR_Raw": float(atr)
+                "ATR_Raw": float(atr), "ATR_Percentile_Raw": atr_percentile,
+                "ADX_Raw": float(adx_val), "ADX_Strength_Raw": adx_strength,
+                "BB_Mid_Raw": float(bb_mid), "BB_Upper_Raw": float(bb_upper), "BB_Lower_Raw": float(bb_lower),
+                "PercentB_Raw": float(percent_b),
+                "Funding_Raw": funding_rate, "OpenInterest_Raw": open_interest,
+                "BTC_Corr_Raw": float(btc_corr),
             })
             loaded_count += 1
         except Exception:
+            fallback_tokens.append(symbol)
             p, chg = get_simple_coingecko_price(gecko_id)
             data.append({
                 "Lp.": loaded_count + 1,
@@ -417,16 +538,21 @@ def fetch_technical_analysis():
                 "RSI 4H": 50.0, "RSI 1D": 50.0, "RSI 3D": 50.0, "RVOL (4H)": "1.0x",
                 "VWAP 7D": fmt(p), "VWAP +2Std": fmt(p * 1.05), "OBV Status": "Neutralny (0.0%)",
                 "OBV Odchylenie (%)": 0.0, "MACD Hist (4H)": "0.0",
+                "ADX (4H)": 20.0, "Siła Trendu": "😴 Brak Trendu (Konsolidacja)",
+                "%B (Boll)": 50.0, "Funding (%)": "-", "Open Interest": "-", "Korelacja BTC (72h)": 0.0,
                 "Price_Raw": p, "EMA200_Raw": p, "EMA50_1D_Raw": p, "Support_Raw": p * 0.95,
                 "Resistance_Raw": p * 1.05, "RSI_4H_Raw": 50.0, "RSI_1D_Raw": 50.0, "RSI_3D_Raw": 50.0,
                 "RVOL_Raw": 1.0, "VWAP_Raw": p, "VWAP_Upper_Raw": p * 1.05, "Is_VWAP_Overextended": False,
                 "OBV_Raw": "Neutralny (0.0%)", "OBV_Diff_Pct": 0.0, "Is_OBV_Accumulating": False,
                 "Regime_Raw": "Konsolidacja", "MTF_Confluence": False, "Vol_Raw": 0.006, "Drift_Raw": 0.0,
-                "RS_BTC_Pct": 0.0, "ATR_Raw": p * 0.02
+                "RS_BTC_Pct": 0.0, "ATR_Raw": p * 0.02, "ATR_Percentile_Raw": 50.0,
+                "ADX_Raw": 20.0, "ADX_Strength_Raw": "😴 Brak Trendu (Konsolidacja)",
+                "BB_Mid_Raw": p, "BB_Upper_Raw": p * 1.02, "BB_Lower_Raw": p * 0.98, "PercentB_Raw": 50.0,
+                "Funding_Raw": None, "OpenInterest_Raw": None, "BTC_Corr_Raw": 0.0,
             })
             loaded_count += 1
 
-    return pd.DataFrame(data), fng_val, fng_class, btc_dom, alt_season, loaded_count, len(TOKENS)
+    return pd.DataFrame(data), fng_val, fng_class, btc_dom, alt_season, loaded_count, len(TOKENS), fallback_tokens
 
 # ==========================================
 # SCORING I PREDYKCJE (STABILNE MONTE CARLO 10 DNI)
@@ -434,7 +560,7 @@ def fetch_technical_analysis():
 def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumulation):
     if df_ta.empty: return pd.DataFrame(), {}
     rng = np.random.default_rng(seed=int(pd.Timestamp.now().strftime("%Y%m%d%H")))
-    
+
     monte_carlo_paths = {}
 
     def analyze_row(row):
@@ -453,9 +579,11 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         resistance = float(row.get("Resistance_Raw", price * 1.05))
         is_vwap_overextended = bool(row.get("Is_VWAP_Overextended", False))
         rs_btc_pct = float(row.get("RS_BTC_Pct", 0.0))
+        adx_val = float(row.get("ADX_Raw", 20.0))
+        funding_rate = row.get("Funding_Raw", None)
 
-        score = 50.0 
-        
+        score = 50.0
+
         # 1. Konfluencja MTF (4H + 1D)
         if mtf_confluence: score += 25.0
         elif "Wzrost 4H" in regime: score += 10.0
@@ -466,7 +594,7 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         elif rs_btc_pct < -2.0: score -= 10.0
 
         # 3. RVOL i Odchylenie OBV (%)
-        score += (rvol - 1.0) * 12.0  
+        score += (rvol - 1.0) * 12.0
         if obv_diff_pct > 0:
             score += min(15.0, obv_diff_pct * 1.5)
         else:
@@ -480,6 +608,19 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         elif rsi_1d > 70: score -= (rsi_1d - 70) * 0.4
 
         if rsi_3d > 75: score -= 10.0
+
+        # 5. [NOWOŚĆ] Siła Trendu (ADX) — potwierdza lub podważa konfluencję MTF
+        if adx_val >= 25 and mtf_confluence:
+            score += 8.0
+        elif adx_val < 15:
+            score -= 5.0
+
+        # 6. [NOWOŚĆ] Funding Rate — sentyment pozycjonowania (tylko gdy dostępny)
+        if funding_rate is not None:
+            if funding_rate > 0.05:
+                score -= 5.0
+            elif funding_rate < -0.02:
+                score += 5.0
 
         score = max(0.0, min(100.0, score))
 
@@ -497,9 +638,9 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         hourly_returns = step_drifts + (shocks * step_vols)
         cum_returns = np.exp(np.cumsum(hourly_returns, axis=1))
         final_prices_paths = price * cum_returns
-        
+
         monte_carlo_paths[symbol] = final_prices_paths
-        
+
         p_24h = float(np.median(final_prices_paths[:, 23]))
         p_3d = float(np.median(final_prices_paths[:, 71]))
         p_10d = float(np.median(final_prices_paths[:, 239]))
@@ -513,20 +654,20 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
 
         is_overextended = (rsi_4h > 65.0) or (price >= resistance * 0.99) or is_vwap_overextended
 
-        if macro_headwind: 
+        if macro_headwind:
             signal = "⏳ ODRZUCONY (Silna dominacja BTC)"
         elif is_vwap_overextended:
             signal = "❌ ODRZUCONY (Przegrzany przy Wstędze VWAP 7D +2 Std)"
-        elif is_overextended: 
+        elif is_overextended:
             signal = "❌ ODRZUCONY (Przegrzany – Unikamy szczytu)"
         elif score >= min_score_filter and rsi_4h <= max_rsi_filter and mtf_confluence:
-            if req_accumulation and not is_obv_acc: 
+            if req_accumulation and not is_obv_acc:
                 signal = "🟡 NEUTRALNY (Brak akumulacji OBV > EMA10)"
-            else: 
+            else:
                 signal = "🟢 WYSOKI EDGE (Solidna Okazja Zakupowa)"
-        elif score >= 55.0: 
+        elif score >= 55.0:
             signal = "🟡 NEUTRALNY (Wymaga obserwacji)"
-        else: 
+        else:
             signal = "❌ ODRZUCONY (Słaba struktura MTF/OBV)"
 
         return pd.Series([
@@ -549,7 +690,7 @@ def plot_price_forecast(symbol, current_price, price_paths):
     upper_95 = np.percentile(price_paths, 97.5, axis=0)
     lower_95 = np.percentile(price_paths, 2.5, axis=0)
     hours = np.arange(1, 241)
-    
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=np.concatenate([hours, hours[::-1]]),
@@ -577,7 +718,7 @@ def plot_price_forecast(symbol, current_price, price_paths):
 def auto_zapisz_sygnaly(df_ml, df_ta):
     if df_ml.empty: return
     kolumny = ["Data Wejścia", "Token", "Typ Sygnału", "Cena Wejścia ($)", "Cel TP (6%) ($)", "SL ($)", "Ekstremum ($)", "Data Wyjścia", "Status", "Zysk (%)"]
-    
+
     if os.path.exists(HISTORY_FILE):
         try:
             df_hist = pd.read_csv(HISTORY_FILE)
@@ -590,13 +731,13 @@ def auto_zapisz_sygnaly(df_ml, df_ta):
 
     nowe_wiersze = []
     okazje = df_ml[df_ml["Ocena Przewagi (Edge)"].str.contains("WYSOKI EDGE", na=False)]
-    
+
     for _, row in okazje.iterrows():
         token = row["Token"]
         if token not in aktywne_tokeny:
             cena_we = float(df_ta[df_ta["Token"] == token].iloc[0]["Price_Raw"])
             atr = float(df_ta[df_ta["Token"] == token].iloc[0]["ATR_Raw"])
-            
+
             cel_tp = cena_we * 1.06
             sl = cena_we - (2.5 * atr)
 
@@ -619,9 +760,9 @@ def auto_zapisz_sygnaly(df_ml, df_ta):
 
 def aktualizuj_i_rozlicz_pozycje(df_ta):
     if not os.path.exists(HISTORY_FILE): return
-    try: 
+    try:
         df_hist = pd.read_csv(HISTORY_FILE)
-    except Exception: 
+    except Exception:
         return
     if df_hist.empty: return
 
@@ -637,7 +778,7 @@ def aktualizuj_i_rozlicz_pozycje(df_ta):
 
         curr_price = float(price_map[token])
         entry = float(row["Cena Wejścia ($)"])
-        
+
         cel_tp = float(row.get("Cel TP (6%) ($)", entry * 1.06))
         sl = float(row["SL ($)"])
 
@@ -674,6 +815,30 @@ def aktualizuj_i_rozlicz_pozycje(df_ta):
 
     df_hist.to_csv(HISTORY_FILE, index=False)
 
+# [NOWOŚĆ] HISTORYCZNA SKUTECZNOŚĆ SYGNAŁÓW DLA KONKRETNEGO TOKENA
+def analiza_historyczna_tokena(symbol):
+    if not os.path.exists(HISTORY_FILE):
+        return None
+    try:
+        df_hist = pd.read_csv(HISTORY_FILE)
+    except Exception:
+        return None
+    if df_hist.empty:
+        return None
+    df_tok = df_hist[(df_hist["Token"] == symbol) & (~df_hist["Status"].astype(str).str.contains("W toku", na=False))]
+    if df_tok.empty:
+        return None
+    total = len(df_tok)
+    sukcesy = len(df_tok[df_tok["Status"].astype(str).str.contains("✅", na=False)])
+    win_rate = (sukcesy / total) * 100 if total > 0 else 0.0
+    sredni_zysk = df_tok["Zysk (%)"].mean() if "Zysk (%)" in df_tok.columns else 0.0
+    return {
+        "total": total,
+        "sukcesy": sukcesy,
+        "win_rate": round(win_rate, 1),
+        "sredni_zysk": round(float(sredni_zysk), 2) if pd.notna(sredni_zysk) else 0.0,
+    }
+
 # ==========================================
 # OBSZERNY RAPORT AI Z PROGNOZĄ W PODSUMOWANIU
 # ==========================================
@@ -683,25 +848,36 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     ema200_raw = float(row_ta.get("EMA200_Raw", 0))
     ema50_1d_raw = float(row_ta.get("EMA50_1D_Raw", 0))
     regime = row_ta.get("Reżim Rynkowy", "Neutralny")
-    
+
     rsi_4h = float(row_ta.get("RSI_4H_Raw", 50))
     rsi_1d = float(row_ta.get("RSI_1D_Raw", 50))
     rsi_3d = float(row_ta.get("RSI_3D_Raw", 50))
-    
+
     rvol_str = str(row_ta.get("RVOL (4H)", "1.0x"))
     vwap_val = float(row_ta.get("VWAP_Raw", price_raw))
     vwap_upper = float(row_ta.get("VWAP_Upper_Raw", price_raw * 1.05))
     is_vwap_overextended = bool(row_ta.get("Is_VWAP_Overextended", False))
-    
+
     obv_status = row_ta.get("OBV Status", "Neutralny")
     obv_diff_pct = float(row_ta.get("OBV_Diff_Pct", 0.0))
     rs_btc_status = str(row_ta.get("Siła vs BTC (72h)", "Neutralny"))
     macd_hist = float(row_ta.get("MACD Hist (4H)", 0.0))
-    
+
     support_str = row_ta.get("Wsparcie", "0.00")
     resistance_str = row_ta.get("Opór", "0.00")
     sl_str = row_ta.get("SL (ATR)", "0.00")
-    
+
+    # [NOWOŚĆ] dodatkowe surowe wskaźniki do raportu
+    adx_val = float(row_ta.get("ADX_Raw", 20.0))
+    adx_strength = row_ta.get("ADX_Strength_Raw", "-")
+    bb_upper = float(row_ta.get("BB_Upper_Raw", price_raw * 1.02))
+    bb_lower = float(row_ta.get("BB_Lower_Raw", price_raw * 0.98))
+    percent_b = float(row_ta.get("PercentB_Raw", 50.0))
+    funding_rate = row_ta.get("Funding_Raw", None)
+    open_interest = row_ta.get("OpenInterest_Raw", None)
+    btc_corr = float(row_ta.get("BTC_Corr_Raw", 0.0))
+    atr_percentile = float(row_ta.get("ATR_Percentile_Raw", 50.0))
+
     edge_status = row_ml.get("Ocena Przewagi (Edge)", "-") if row_ml is not None else "-"
     smart_score = f"{float(row_ml.get('Smart Score (%)', 50.0)):.2f}" if row_ml is not None else "50.00"
     prognoza_24h = row_ml.get("Prognoza 24h", "-") if row_ml is not None else "-"
@@ -709,7 +885,7 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     prognoza_10d = row_ml.get("Prognoza 10D", "-") if row_ml is not None else "-"
     zasieg_mc_10d = row_ml.get("Zasięg MC 10D (95%)", "-") if row_ml is not None else "-"
     prob_up_10d = row_ml.get("Szansa Wzrostu (10D)", "-") if row_ml is not None else "-"
-    
+
     target_tp1 = price_raw * 1.06
 
     # Opisy sekcji
@@ -721,12 +897,28 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     else:
         pa_desc += "Cena pozostaje poniżej kluczowych średnich, co zwiększa ryzyko kontynuacji spadków lub trwałej konsolidacji."
 
+    # [NOWOŚĆ] Opis siły trendu ADX
+    adx_desc = f"**ADX (4H):** `{adx_val}` — {adx_strength}. "
+    if adx_val >= 25:
+        adx_desc += "Wysoka wartość ADX potwierdza, że obecny kierunek (niezależnie od tego czy jest to trend wzrostowy czy spadkowy) jest strukturalnie silny, a nie przypadkowym szumem."
+    elif adx_val < 15:
+        adx_desc += "Bardzo niska wartość ADX oznacza brak wyraźnego trendu — rynek porusza się w konsolidacji, co zwiększa ryzyko fałszywych sygnałów (whipsaw)."
+    else:
+        adx_desc += "Trend jest obecny, ale umiarkowany — brak jeszcze pełnego potwierdzenia siły ruchu."
+
     btc_dom_desc = f"Dominacja Bitcoina na poziomie `{btc_dom}%` wpływa na całe otoczenie rynkowe. "
     btc_dom_desc += f"Wskaźnik Siły Względnej dla {symbol} w relacji do BTC (okienko 72h) wynosi: `{rs_btc_status}`. "
-    if obv_diff_pct > 0:
-        btc_dom_desc += f"Dodatnie odchylenie OBV od EMA10 wynoszące `{obv_diff_pct:.2f}%` potwerdza realny dopływ kapitału."
+    btc_dom_desc += f"Korelacja zwrotów godzinowych z BTC (72h) wynosi `{btc_corr}` — "
+    if btc_corr >= 0.7:
+        btc_dom_desc += "token porusza się mocno w zgodzie z Bitcoinem, więc jego niezależny 'edge' jest ograniczony."
+    elif btc_corr <= 0.3:
+        btc_dom_desc += "token wykazuje relatywną niezależność od ruchów BTC, co może świadczyć o własnej narracji rynkowej."
     else:
-        btc_dom_desc += f"Ujemne odchylenie OBV (`{obv_diff_pct:.2f}%`) ostrzega przed brakiem akumulacji."
+        btc_dom_desc += "korelacja jest umiarkowana — częściowo podąża za BTC, częściowo działa niezależnie."
+    if obv_diff_pct > 0:
+        btc_dom_desc += f" Dodatnie odchylenie OBV od EMA10 wynoszące `{obv_diff_pct:.2f}%` potwierdza realny dopływ kapitału."
+    else:
+        btc_dom_desc += f" Ujemne odchylenie OBV (`{obv_diff_pct:.2f}%`) ostrzega przed brakiem akumulacji."
 
     rvol_float = float(rvol_str.replace("x", "")) if "x" in rvol_str else 1.0
     rvol_desc = f"**RVOL (Względny Wolumen 4H):** `{rvol_str}`. " + ("Obserwujemy anomalię wolumenową – aktywność Smart Money." if rvol_float >= 1.5 else "Obroty pozostają na standardowym poziomie.")
@@ -737,18 +929,67 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     else:
         vwap_desc += "Cena utrzymuje się w bezpiecznym przedziale względem tygodniowego VWAP."
 
-    rsi_desc = f"**Triada RSI:** 4H (`{round(rsi_4h, 1)}`), 1D (`{round(rsi_1d, 1)}`), 3D (`{round(rsi_3d, 1)}`). "
+    # [NOWOŚĆ] Opis Bollinger %B
+    bb_desc = f"**Wstęgi Bollingera (20, 2σ, 4H):** Górna `{fmt(bb_upper)} $`, dolna `{fmt(bb_lower)} $`. Pozycja ceny w paśmie (%B): `{percent_b}%`. "
+    if percent_b >= 95:
+        bb_desc += "Cena przy górnej krawędzi wstęgi — niezależne od VWAP potwierdzenie przegrzania."
+    elif percent_b <= 5:
+        bb_desc += "Cena przy dolnej krawędzi wstęgi — statystyczne wyprzedanie, potencjalne miejsce reakcji popytu."
+    else:
+        bb_desc += "Cena porusza się w normalnym zakresie zmienności."
+
+    rsi_desc = f"**Triada RSI (Wilder):** 4H (`{round(rsi_4h, 1)}`), 1D (`{round(rsi_1d, 1)}`), 3D (`{round(rsi_3d, 1)}`). "
     if rsi_4h < 40:
         rsi_desc += "Interwał 4H wykazuje lokalne wyprzedanie (potencjalne miejsce odbicia)."
     elif rsi_4h > 65:
         rsi_desc += "Interwał 4H sygnalizuje silne wykupienie."
 
-    if "WYSOKI EDGE" in edge_status: 
-        final_reco = "🟢 **REKOMENDACJA:** Sygnał zakupu wysokiej jakości. Struktura MTF, odchylenie OBV oraz symulacja MC wskazują na wyraźną przewagę statystyczną."
-    elif "NEUTRALNY" in edge_status: 
-        final_reco = "🟡 **REKOMENDACJA:** Pozycja neutralna / Obserwacja. Brak pełnej konfluencji średnich lub niedostateczna akumulacja na OBV."
-    else: 
-        final_reco = "❌ **REKOMENDACJA:** Sygnał odrzucony. Ryzyko wynikające z braku trendu, przegrzania na VWAP lub słabości względnej do BTC."
+    # [NOWOŚĆ] Opis zmienności (percentyl ATR)
+    vol_desc = f"**Percentyl Zmienności (ATR 4H):** `{round(atr_percentile, 1)}%` na tle dostępnej historii świec. "
+    if atr_percentile >= 80:
+        vol_desc += "Zmienność jest obecnie bardzo podwyższona — ruchy cenowe (w obie strony) mogą być gwałtowniejsze niż zwykle, co zwiększa ryzyko szerokich wybić SL."
+    elif atr_percentile <= 20:
+        vol_desc += "Zmienność jest obecnie ściśnięta — rynek 'oddycha' spokojniej, co bywa preludium do gwałtownego ruchu kierunkowego."
+    else:
+        vol_desc += "Zmienność mieści się w typowym zakresie."
+
+    # [NOWOŚĆ] Opis Funding Rate / Open Interest
+    if funding_rate is not None:
+        funding_desc = f"**Funding Rate (Binance Futures):** `{funding_rate}%`. "
+        if funding_rate > 0.05:
+            funding_desc += "Wysoki dodatni funding oznacza, że pozycje długie dominują i płacą premię shortom — rynek jest 'zatłoczony' po stronie longów, co zwiększa ryzyko gwałtownej likwidacji przy odwróceniu (long squeeze)."
+        elif funding_rate < -0.02:
+            funding_desc += "Ujemny funding oznacza przewagę shortów płacących longom — potencjalne paliwo pod short squeeze przy odbiciu ceny."
+        else:
+            funding_desc += "Funding jest neutralny — brak wyraźnego przegięcia pozycjonowania na rynku derywatów."
+        if open_interest is not None:
+            funding_desc += f" Open Interest: `{fmt(open_interest)}` kontraktów."
+    else:
+        funding_desc = "**Funding Rate:** Brak danych z rynku kontraktów wieczystych dla tego aktywa (token niedostępny na Binance Futures lub API nie odpowiedziało)."
+
+    if "WYSOKI EDGE" in edge_status:
+        final_reco = "🟢 **REKOMENDACJA:** Sygnał zakupu wysokiej jakości. Struktura MTF, siła trendu (ADX), odchylenie OBV oraz symulacja MC wskazują na wyraźną przewagę statystyczną."
+    elif "NEUTRALNY" in edge_status:
+        final_reco = "🟡 **REKOMENDACJA:** Pozycja neutralna / Obserwacja. Brak pełnej konfluencji średnich, niedostateczna siła trendu (ADX) lub akumulacja na OBV."
+    else:
+        final_reco = "❌ **REKOMENDACJA:** Sygnał odrzucony. Ryzyko wynikające z braku trendu, przegrzania na VWAP/Bollingerze lub słabości względnej do BTC."
+
+    # [NOWOŚĆ] Sekcja historycznej skuteczności tokena
+    hist_stats = analiza_historyczna_tokena(symbol)
+    if hist_stats is not None:
+        hist_desc = (
+            f"Algorytm zamknął dotychczas **{hist_stats['total']}** pozycji na {symbol}, z czego "
+            f"**{hist_stats['sukcesy']}** zakończyło się sukcesem (osiągnięciem TP). "
+            f"Historyczny **Win Rate: {hist_stats['win_rate']}%**, średni wynik na zamkniętej pozycji: **{hist_stats['sredni_zysk']}%**. "
+        )
+        if hist_stats['win_rate'] >= 60:
+            hist_desc += "Token historycznie dobrze reaguje na sygnały algorytmu."
+        elif hist_stats['win_rate'] <= 40 and hist_stats['total'] >= 3:
+            hist_desc += "⚠️ Token historycznie generował więcej strat niż zysków przy tej strategii — zachowaj dodatkową ostrożność."
+        else:
+            hist_desc += "Próbka jest zbyt mała lub mieszana, by wyciągać mocne wnioski."
+    else:
+        hist_desc = "Brak jeszcze zamkniętych pozycji historycznych dla tego tokena — algorytm nie ma jeszcze próbki do oceny skuteczności."
 
     return f"""
 ### 🎯 EKSPERCKI RAPORT ANALITYCZNY MTF PRO: {symbol}
@@ -757,32 +998,42 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
 ---
 #### 1. 🧠 Analiza Strukturalna i Makroekonomiczna
 * **Struktura MTF (4H EMA200 & 1D EMA50):** {pa_desc}
-* **Dominacja BTC & Siła Względna (72h):** {btc_dom_desc}
+* **Siła Trendu (ADX):** {adx_desc}
+* **Dominacja BTC, Siła Względna i Korelacja (72h):** {btc_dom_desc}
 
-#### 2. 📊 Wolumen, 7D VWAP i Smart Money
+#### 2. 📊 Wolumen, Wstęgi Cenowe i Smart Money
 * {rvol_desc}
 * {vwap_desc}
+* {bb_desc}
 * **Wygładzony OBV Status:** `{obv_status}`.
 
-#### 3. 📈 Momentum i Oscylatory
+#### 3. 📈 Momentum, Zmienność i Oscylatory
 * {rsi_desc}
 * **MACD Histogram 4H:** `{fmt(macd_hist)}`.
+* {vol_desc}
 
-#### 4. 🎲 Symulacja Probabilistyczna Monte Carlo (10 Dni)
+#### 4. 🧭 Rynek Derywatów (Sentyment)
+* {funding_desc}
+
+#### 5. 🎲 Symulacja Probabilistyczna Monte Carlo (10 Dni)
 * **Wizja 24-godzinna (Mediana):** `{prognoza_24h}`
 * **Wizja 3-dniowa (Mediana):** `{prognoza_3d}`
 * **Wizja 10-dniowa (Mediana):** `{prognoza_10d}`
 * **Przedział Ufności 95% (10D):** `{zasieg_mc_10d}`
 * **Prawdopodobieństwo wzrostu:** `{prob_up_10d}`
+* ℹ️ *Uwaga metodologiczna: dryf symulacji jest w większości pochodną Smart Score (te same dane wejściowe co scoring), a w mniejszym stopniu niezależnym momentum cenowym — traktuj to jako wizualizację obecnej struktury, nie niezależną prognozę.*
 
-#### 5. 🛡️ Inżynieria Ryzyka i Taktyka
+#### 6. 📜 Historyczna Skuteczność Tego Tokena
+* {hist_desc}
+
+#### 7. 🛡️ Inżynieria Ryzyka i Taktyka
 * **Wsparcie 4H:** `{support_str}` | **Opór 4H:** `{resistance_str}`
 * **Stop Loss (2.5x ATR):** `{sl_str}`
 * **Cel Taktyczny TP (+6%):** `{fmt(target_tp1)} $`
 
 ---
 ### 📝 PODSUMOWANIE ANALIZY I PROGNOZA KOŃCOWA
-Model ocenia prawdopodobieństwo sukcesu pozycji na podstawie **Smart Score {smart_score}%** w warunkach **{regime}**.
+Model ocenia prawdopodobieństwo sukcesu pozycji na podstawie **Smart Score {smart_score}%** w warunkach **{regime}**, przy sile trendu **{adx_strength}**.
 
 * **Prognoza Krótkoterminowa (1-3 Dni):** Mediana skanera wskazuje poziom `{prognoza_3d}`. Ruch będzie determinowany przez utrzymanie wsparcia na poziomie `{support_str}`.
 * **Prognoza Średnioterminowa (10 Dni):** Mediana symulacji wynosi `{prognoza_10d}` z dolną granicą skrajną `{zasieg_mc_10d.split('-')[0].strip()}` przy szansie powodzenia `{prob_up_10d}`.
@@ -794,11 +1045,20 @@ Model ocenia prawdopodobieństwo sukcesu pozycji na podstawie **Smart Score {sma
 # INTERFEJS GŁÓWNY STREAMLIT (UI)
 # ==========================================
 with st.spinner("🔄 Pobieram dane na żywo z API i przeliczam wskaźniki..."):
-    df_ta, fng_val, fng_class, btc_dom, alt_season, loaded_c, total_c = fetch_technical_analysis()
+    df_ta, fng_val, fng_class, btc_dom, alt_season, loaded_c, total_c, fallback_tokens = fetch_technical_analysis()
     df_ml, mc_paths = run_predictions(df_ta, btc_dom, min_smart_score, max_rsi_4h, wymagaj_akumulacji)
-    
+
     auto_zapisz_sygnaly(df_ml, df_ta)
     aktualizuj_i_rozlicz_pozycje(df_ta)
+
+# [NOWOŚĆ] Widoczność jakości danych w sidebarze (Punkt 4)
+with st.sidebar:
+    st.divider()
+    st.subheader("🛰️ Jakość Danych")
+    if fallback_tokens:
+        st.warning(f"⚠️ {len(fallback_tokens)}/{total_c} tokenów działa na danych zastępczych (fallback): {', '.join(fallback_tokens)}")
+    else:
+        st.success("✅ Wszystkie tokeny załadowane z pełnych danych świecowych.")
 
 col_t, col_d1, col_d2, col_f = st.columns([2.0, 1, 1, 1])
 col_t.title("📊 Analiza Krypto MTF Pro")
@@ -817,7 +1077,7 @@ if not df_ml.empty:
         for i, (_, row) in enumerate(okazje_df.iterrows()):
             with cols_okazje[i % len(cols_okazje)]:
                 score_val = float(row['Smart Score (%)'])
-                st.success(f"**{row['Token']}**\n\nCena: `{row['Cena ($)']}`\nSmart Score: **{score_val:.2f}%**\nPrognoza 10D: **{row['Prognoza 10D']}**")
+                st.success(f"**{row['Token']}**\n\nCena: `{row['Cena ($)']}`\nSmart Score: **{score_val:.2f}%**\nADX: **{row['ADX (4H)']}**\nPrognoza 10D: **{row['Prognoza 10D']}**")
     else:
         st.info("Obecnie żaden token nie spełnia restrykcyjnych warunków algorytmu (odfiltrowano przegrzane aktywa oraz brak konfluencji MTF/OBV).")
 
@@ -831,7 +1091,7 @@ if st.button("🔄 Odśwież dane", type="primary"):
 df_tab1_view = df_ta[["Lp.", "Token", "Cena ($)", "24h (%)", "Reżim Rynkowy", "EMA 200 (4H)", "EMA 50 (1D)", "Siła vs BTC (72h)", "Wsparcie", "Opór", "SL (ATR)", "R:R"]].copy()
 
 if not df_ml.empty:
-    df_tab2_view = df_ml[["Lp.", "Token", "Cena ($)", "Smart Score (%)", "Ocena Przewagi (Edge)", "RSI 4H", "RSI 1D", "RSI 3D", "RVOL (4H)", "VWAP 7D", "VWAP +2Std", "OBV Odchylenie (%)", "Prognoza 10D", "Zasięg MC 10D (95%)", "Szansa Wzrostu (10D)"]].copy()
+    df_tab2_view = df_ml[["Lp.", "Token", "Cena ($)", "Smart Score (%)", "Ocena Przewagi (Edge)", "RSI 4H", "RSI 1D", "RSI 3D", "ADX (4H)", "Siła Trendu", "RVOL (4H)", "VWAP 7D", "VWAP +2Std", "%B (Boll)", "OBV Odchylenie (%)", "Funding (%)", "Korelacja BTC (72h)", "Prognoza 10D", "Zasięg MC 10D (95%)", "Szansa Wzrostu (10D)"]].copy()
 else:
     df_tab2_view = pd.DataFrame()
 
@@ -846,7 +1106,10 @@ config_tabel_tab2 = {
     "RSI 4H": st.column_config.NumberColumn("RSI 4H", format="%.1f"),
     "RSI 1D": st.column_config.NumberColumn("RSI 1D", format="%.1f"),
     "RSI 3D": st.column_config.NumberColumn("RSI 3D", format="%.1f"),
+    "ADX (4H)": st.column_config.NumberColumn("ADX (4H)", format="%.1f"),
+    "%B (Boll)": st.column_config.NumberColumn("%B (Boll)", format="%.1f"),
     "OBV Odchylenie (%)": st.column_config.NumberColumn("OBV Odchylenie (%)", format="%.2f"),
+    "Korelacja BTC (72h)": st.column_config.NumberColumn("Korelacja BTC (72h)", format="%.2f"),
 }
 
 def apply_high_contrast_striping(df):
@@ -857,7 +1120,7 @@ def apply_high_contrast_striping(df):
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["1. 🏛️ Skaner Makro i Struktura", "2. ⚡ Skaner Sygnałowy i Egzekucja", "3. 🎯 Aktywne Pozycje", "4. 🗂️ Archiwum", "5. 📈 Skuteczność Algorytmu"])
 
-with tab1: 
+with tab1:
     st.subheader("🏛️ Struktura Rynkowa i Konfluencja MTF")
     st.dataframe(apply_high_contrast_striping(df_tab1_view), column_config=config_tabel_tab1, use_container_width=True, hide_index=True)
 
@@ -868,13 +1131,13 @@ with tab2:
     st.subheader("➕ Śledź wybraną pozycję ręcznie")
     col_sel_tok, col_sel_btn = st.columns([2, 1])
     chosen_token = col_sel_tok.selectbox("Wybierz token:", df_ta["Token"].tolist(), key="manual_token_pick")
-    
+
     if col_sel_btn.button("🚀 Dodaj do śledzenia", type="primary"):
         cena_we = float(df_ta[df_ta["Token"] == chosen_token].iloc[0]["Price_Raw"])
         atr = float(df_ta[df_ta["Token"] == chosen_token].iloc[0]["ATR_Raw"])
         cel_tp = cena_we * 1.06
         sl = cena_we - (2.5 * atr)
-        
+
         nowa = pd.DataFrame([{
             "Data Wejścia": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
             "Token": chosen_token,
@@ -887,7 +1150,7 @@ with tab2:
             "Status": "🔄 W toku",
             "Zysk (%)": 0.0
         }])
-        
+
         df_h = pd.concat([pd.read_csv(HISTORY_FILE), nowa], ignore_index=True) if os.path.exists(HISTORY_FILE) else nowa
         df_h.to_csv(HISTORY_FILE, index=False)
         st.success(f"Rozpoczęto śledzenie {chosen_token} po ${fmt(cena_we)} z celem TP (+6%): ${fmt(cel_tp)}!")
@@ -898,13 +1161,13 @@ with tab3:
         try:
             df_hist = pd.read_csv(HISTORY_FILE)
             df_active = df_hist[df_hist["Status"].str.contains("W toku", na=False)]
-            if not df_active.empty: 
+            if not df_active.empty:
                 st.dataframe(apply_high_contrast_striping(df_active.sort_values("Data Wejścia", ascending=False)), use_container_width=True, hide_index=True)
-            else: 
+            else:
                 st.info("Brak aktywnych pozycji (żaden token nie spełnia obecnie warunków zakupu po odfiltrowaniu szczytów).")
         except Exception:
             st.info("Brak aktywnych pozycji.")
-    else: 
+    else:
         st.info("Brak danych w bazie.")
 
 with tab4:
@@ -912,13 +1175,13 @@ with tab4:
         try:
             df_hist = pd.read_csv(HISTORY_FILE)
             df_closed = df_hist[~df_hist["Status"].str.contains("W toku", na=False)]
-            if not df_closed.empty: 
+            if not df_closed.empty:
                 st.dataframe(apply_high_contrast_striping(df_closed.sort_values("Data Wyjścia", ascending=False)), use_container_width=True, hide_index=True)
-            else: 
+            else:
                 st.info("Algorytm nie zamknął jeszcze żadnej transakcji po nowych regułach.")
         except Exception:
             st.info("Brak zamkniętych pozycji.")
-    else: 
+    else:
         st.info("Brak zamkniętych.")
 
 with tab5:
@@ -926,19 +1189,19 @@ with tab5:
         try:
             df_hist = pd.read_csv(HISTORY_FILE)
             df_closed = df_hist[~df_hist["Status"].str.contains("W toku", na=False)]
-            
+
             if not df_closed.empty:
                 sukcesy = len(df_closed[df_closed["Status"].str.contains("✅", na=False)])
                 wszystkie = len(df_closed)
                 win_rate = (sukcesy / wszystkie) * 100
                 sredni_zysk = df_closed["Zysk (%)"].mean()
-                
+
                 k1, k2, k3, k4 = st.columns(4)
                 k1.metric("Zakończone Sygnały", wszystkie)
                 k2.metric("Osiągnięty TP (Sukces)", sukcesy)
                 k3.metric("Skuteczność (Win Rate)", f"{win_rate:.1f}%")
                 k4.metric("Średni Zysk/Strata z pozycji", f"{sredni_zysk:.2f}%")
-                
+
                 st.markdown("### Dystrybucja zysków/strat po zamknięciu")
                 st.bar_chart(df_closed.set_index("Token")["Zysk (%)"])
             else:
@@ -952,12 +1215,12 @@ if not df_ta.empty:
     st.divider()
     st.subheader("🤖 Ekspercki Raport Analityczny Pro")
     sel_ai = st.selectbox("Wybierz token do dogłębnej analizy:", df_ta["Token"].tolist())
-    
+
     col_rep_text, col_rep_chart = st.columns([1.2, 1])
-    
+
     with col_rep_text:
         st.markdown(generuj_raport_ai(df_ta[df_ta["Token"] == sel_ai].iloc[0], df_ml[df_ml["Token"] == sel_ai].iloc[0] if not df_ml.empty else None, btc_dom))
-    
+
     with col_rep_chart:
         st.markdown("<br><br>", unsafe_allow_html=True)
         if sel_ai in mc_paths:
