@@ -101,22 +101,28 @@ with st.sidebar:
 # ==========================================
 # LISTA TOKENÓW SPOT (COINBASE / GECKO) + MAPA BINANCE FUTURES
 # ==========================================
+# UWAGA (JUP): na Coinbase istnieją dwa różne aktywa noszące skrót "JUP" —
+# prawdziwy Jupiter (DEX aggregator na Solanie) oraz stary, niepowiązany
+# projekt "Jupiter" (token na Ethereum, ok. $0.0002-0.0009). Dlatego JUP celowo
+# ma "coinbase": None (nigdy nie pytamy Coinbase o JUP-USD) i opiera się na
+# Binance Spot (JUPUSDT — jednoznacznie właściwy token) oraz CoinGecko
+# (gecko_id "jupiter-exchange-solana" — to również poprawne, zweryfikowane ID).
 TOKENS = [
-    {"symbol": "ONDO", "coinbase": "ONDO-USD", "gecko_id": "ondo-finance", "binance_futures": "ONDOUSDT"},
-    {"symbol": "INJ", "coinbase": "INJ-USD", "gecko_id": "injective-protocol", "binance_futures": "INJUSDT"},
-    {"symbol": "LINK", "coinbase": "LINK-USD", "gecko_id": "chainlink", "binance_futures": "LINKUSDT"},
-    {"symbol": "RENDER", "coinbase": "RENDER-USD", "gecko_id": "render-token", "binance_futures": "RENDERUSDT"},
-    {"symbol": "FET", "coinbase": "FET-USD", "gecko_id": "artificial-superintelligence-alliance", "binance_futures": "FETUSDT"},
-    {"symbol": "BTC", "coinbase": "BTC-USD", "gecko_id": "bitcoin", "binance_futures": "BTCUSDT"},
-    {"symbol": "ETH", "coinbase": "ETH-USD", "gecko_id": "ethereum", "binance_futures": "ETHUSDT"},
-    {"symbol": "ENA", "coinbase": "ENA-USD", "gecko_id": "ethena", "binance_futures": "ENAUSDT"},
-    {"symbol": "PENDLE", "coinbase": "PENDLE-USD", "gecko_id": "pendle", "binance_futures": "PENDLEUSDT"},
-    {"symbol": "NEAR", "coinbase": "NEAR-USD", "gecko_id": "near", "binance_futures": "NEARUSDT"},
-    {"symbol": "PLUME", "coinbase": "PLUME-USD", "gecko_id": "plume", "binance_futures": None},
-    {"symbol": "JUP", "coinbase": None, "gecko_id": "jupiter-exchange-solana", "binance_futures": "JUPUSDT"},
-    {"symbol": "UNI", "coinbase": "UNI-USD", "gecko_id": "uniswap", "binance_futures": "UNIUSDT"},
-    {"symbol": "SEI", "coinbase": "SEI-USD", "gecko_id": "sei-network", "binance_futures": "SEIUSDT"},
-    {"symbol": "SOL", "coinbase": "SOL-USD", "gecko_id": "solana", "binance_futures": "SOLUSDT"},
+    {"symbol": "ONDO", "coinbase": "ONDO-USD", "gecko_id": "ondo-finance", "binance_symbol": "ONDOUSDT"},
+    {"symbol": "INJ", "coinbase": "INJ-USD", "gecko_id": "injective-protocol", "binance_symbol": "INJUSDT"},
+    {"symbol": "LINK", "coinbase": "LINK-USD", "gecko_id": "chainlink", "binance_symbol": "LINKUSDT"},
+    {"symbol": "RENDER", "coinbase": "RENDER-USD", "gecko_id": "render-token", "binance_symbol": "RENDERUSDT"},
+    {"symbol": "FET", "coinbase": "FET-USD", "gecko_id": "artificial-superintelligence-alliance", "binance_symbol": "FETUSDT"},
+    {"symbol": "BTC", "coinbase": "BTC-USD", "gecko_id": "bitcoin", "binance_symbol": "BTCUSDT"},
+    {"symbol": "ETH", "coinbase": "ETH-USD", "gecko_id": "ethereum", "binance_symbol": "ETHUSDT"},
+    {"symbol": "ENA", "coinbase": "ENA-USD", "gecko_id": "ethena", "binance_symbol": "ENAUSDT"},
+    {"symbol": "PENDLE", "coinbase": "PENDLE-USD", "gecko_id": "pendle", "binance_symbol": "PENDLEUSDT"},
+    {"symbol": "NEAR", "coinbase": "NEAR-USD", "gecko_id": "near", "binance_symbol": "NEARUSDT"},
+    {"symbol": "PLUME", "coinbase": "PLUME-USD", "gecko_id": "plume", "binance_symbol": None},
+    {"symbol": "JUP", "coinbase": None, "gecko_id": "jupiter-exchange-solana", "binance_symbol": "JUPUSDT"},
+    {"symbol": "UNI", "coinbase": "UNI-USD", "gecko_id": "uniswap", "binance_symbol": "UNIUSDT"},
+    {"symbol": "SEI", "coinbase": "SEI-USD", "gecko_id": "sei-network", "binance_symbol": "SEIUSDT"},
+    {"symbol": "SOL", "coinbase": "SOL-USD", "gecko_id": "solana", "binance_symbol": "SOLUSDT"},
 ]
 
 def fmt(val):
@@ -203,6 +209,44 @@ def get_simple_coingecko_price(gecko_id):
         pass
     return 1.0, 0.0
 
+def fetch_from_binance_spot(binance_symbol, interval="1h", limit=300):
+    """Publiczne, bezkluczowe API Binance Spot — dane live, wysoki rate limit.
+    Dla tokenów bez pary na Coinbase (np. JUP) to znacznie pewniejsze źródło
+    niż darmowe, throttlowane CoinGecko."""
+    if not binance_symbol:
+        raise ValueError("Brak mapowania Binance dla tego tokena")
+    url = "https://api.binance.com/api/v3/klines"
+    params = {"symbol": binance_symbol, "interval": interval, "limit": limit}
+    res = requests.get(url, params=params, headers={"User-Agent": "CryptoDashboard/1.0"}, timeout=5)
+    res.raise_for_status()
+    raw = res.json()
+    if not raw:
+        raise ValueError("Puste dane z Binance")
+    df = pd.DataFrame(raw, columns=[
+        "timestamp", "open", "high", "low", "close", "volume",
+        "close_time", "quote_asset_volume", "trades",
+        "taker_buy_base", "taker_buy_quote", "ignore"
+    ])
+    df = df[["timestamp", "open", "high", "low", "close", "volume"]].astype(float)
+    df["dt"] = pd.to_datetime(df["timestamp"], unit="ms")
+    return df.sort_values("dt").reset_index(drop=True)
+
+def get_simple_binance_price(binance_symbol):
+    """Awaryjny odczyt bieżącej ceny z Binance (ticker/24hr) — używany jako
+    pierwszy wybór w gałęzi fallback, zanim sięgniemy po CoinGecko."""
+    if not binance_symbol:
+        return None, None
+    try:
+        url = "https://api.binance.com/api/v3/ticker/24hr"
+        res = requests.get(url, params={"symbol": binance_symbol}, headers={"User-Agent": "CryptoDashboard/1.0"}, timeout=4).json()
+        price = float(res.get("lastPrice", 0))
+        change = float(res.get("priceChangePercent", 0))
+        if price > 0:
+            return price, change
+    except Exception:
+        pass
+    return None, None
+
 def get_funding_rate_and_oi(binance_symbol):
     """Pobiera Funding Rate i Open Interest z publicznego API Binance Futures (bez klucza)."""
     if not binance_symbol:
@@ -234,6 +278,14 @@ def get_candles_1h(token_info):
             df = fetch_from_coinbase(token_info["coinbase"], granularity=3600)
             if not df.empty and len(df) >= 20: return df
         except Exception: pass
+    # [NOWOŚĆ] Binance Spot jako druga warstwa — kluczowe dla tokenów bez
+    # pary na Coinbase (np. JUP), gdzie wcześniej jedynym źródłem było
+    # wolniejsze/cache'owane CoinGecko.
+    if token_info.get("binance_symbol"):
+        try:
+            df = fetch_from_binance_spot(token_info["binance_symbol"], interval="1h", limit=300)
+            if not df.empty and len(df) >= 20: return df
+        except Exception: pass
     try: return fetch_from_coingecko(token_info["gecko_id"])
     except Exception: return pd.DataFrame()
 
@@ -241,6 +293,11 @@ def get_candles_1d(token_info):
     if token_info.get("coinbase"):
         try:
             df = fetch_from_coinbase(token_info["coinbase"], granularity=86400)
+            if not df.empty and len(df) >= 14: return df
+        except Exception: pass
+    if token_info.get("binance_symbol"):
+        try:
+            df = fetch_from_binance_spot(token_info["binance_symbol"], interval="1d", limit=60)
             if not df.empty and len(df) >= 14: return df
         except Exception: pass
     return pd.DataFrame()
@@ -455,7 +512,7 @@ def fetch_technical_analysis():
             bb_mid, bb_upper, bb_lower, percent_b = calc_bollinger(df_4h["close"])
 
             # [NOWOŚĆ] FUNDING RATE I OPEN INTEREST (BINANCE FUTURES)
-            funding_rate, open_interest = get_funding_rate_and_oi(item.get("binance_futures"))
+            funding_rate, open_interest = get_funding_rate_and_oi(item.get("binance_symbol"))
 
             tr = pd.concat([df_4h["high"] - df_4h["low"], (df_4h["high"] - df_4h["close"].shift()).abs(), (df_4h["low"] - df_4h["close"].shift()).abs()], axis=1).max(axis=1) if len(df_4h) > 1 else pd.Series([price * 0.02])
             atr_series = tr.rolling(min(14, len(df_4h))).mean().dropna()
@@ -528,7 +585,12 @@ def fetch_technical_analysis():
             loaded_count += 1
         except Exception:
             fallback_tokens.append(symbol)
-            p, chg = get_simple_coingecko_price(gecko_id)
+            # [NOWOŚĆ] Kolejność awaryjna: Binance (live) -> CoinGecko (cache) -> 1.0 domyślnie.
+            # To bezpośrednio adresuje przypadek JUP, który wcześniej mógł
+            # lądować na sztywnej wartości 1.0, gdy CoinGecko nie odpowiadało.
+            p, chg = get_simple_binance_price(item.get("binance_symbol"))
+            if p is None:
+                p, chg = get_simple_coingecko_price(gecko_id)
             data.append({
                 "Lp.": loaded_count + 1,
                 "Token": symbol, "Cena ($)": fmt(p), "24h (%)": round(chg, 2),
