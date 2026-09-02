@@ -209,15 +209,17 @@ def get_simple_coingecko_price(gecko_id):
         pass
     return 1.0, 0.0
 
-def fetch_from_binance_spot(binance_symbol, interval="1h", limit=300):
-    """Publiczne, bezkluczowe API Binance Spot — dane live, wysoki rate limit.
-    Dla tokenów bez pary na Coinbase (np. JUP) to znacznie pewniejsze źródło
-    niż darmowe, throttlowane CoinGecko."""
+def fetch_from_binance_klines(binance_symbol, interval="1h", limit=300):
+    """Publiczne, bezkluczowe API Binance (Spot Klines) — dane live, wysoki rate limit.
+    Uniwersalna dla dowolnego interwału (1h, 4h, 1d). Dla tokenów bez pary na
+    Coinbase (np. JUP) to znacznie pewniejsze źródło niż throttlowane CoinGecko,
+    a dla świec 4H/1D — jedyne źródło dające WYSTARCZAJĄCĄ długość historii
+    (do 1000 świec na zapytanie) do policzenia prawdziwego EMA200/EMA50."""
     if not binance_symbol:
         raise ValueError("Brak mapowania Binance dla tego tokena")
     url = "https://api.binance.com/api/v3/klines"
     params = {"symbol": binance_symbol, "interval": interval, "limit": limit}
-    res = requests.get(url, params=params, headers={"User-Agent": "CryptoDashboard/1.0"}, timeout=5)
+    res = requests.get(url, params=params, headers={"User-Agent": "CryptoDashboard/1.0"}, timeout=6)
     res.raise_for_status()
     raw = res.json()
     if not raw:
@@ -278,29 +280,63 @@ def get_candles_1h(token_info):
             df = fetch_from_coinbase(token_info["coinbase"], granularity=3600)
             if not df.empty and len(df) >= 20: return df
         except Exception: pass
-    # [NOWOŚĆ] Binance Spot jako druga warstwa — kluczowe dla tokenów bez
-    # pary na Coinbase (np. JUP), gdzie wcześniej jedynym źródłem było
-    # wolniejsze/cache'owane CoinGecko.
     if token_info.get("binance_symbol"):
         try:
-            df = fetch_from_binance_spot(token_info["binance_symbol"], interval="1h", limit=300)
+            df = fetch_from_binance_klines(token_info["binance_symbol"], interval="1h", limit=300)
             if not df.empty and len(df) >= 20: return df
         except Exception: pass
     try: return fetch_from_coingecko(token_info["gecko_id"])
     except Exception: return pd.DataFrame()
 
-def get_candles_1d(token_info):
+# [POPRAWKA KRYTYCZNA] NATYWNE ŚWIECE 4H
+# Coinbase NIE oferuje granulacji 4h (tylko 1min/5min/15min/1h/6h/1d), więc
+# poprzednia wersja musiała resamplować z maksymalnie 300 świec 1h (12,5 dnia)
+# -> dawało to ok. 75 świec 4H, drastycznie za mało na prawdziwe EMA200 (wymaga
+# min. 200 świec, a solidne rozgrzanie EMA to ok. 2-3x span = 400-600 świec).
+# Binance oferuje natywny interwał 4h z limitem do 1000 świec/zapytanie -> 300
+# świec 4H to ok. 50 dni historii, w pełni wystarczające na wiarygodne EMA200.
+# Zwraca (df, is_native) — is_native=False oznacza degradację do resamplingu
+# z 1H (mniej wiarygodne dane), co jest jawnie oznaczane w dalszej analizie.
+def get_candles_4h(token_info, df_1h_fallback=None):
+    if token_info.get("binance_symbol"):
+        try:
+            df = fetch_from_binance_klines(token_info["binance_symbol"], interval="4h", limit=300)
+            if not df.empty and len(df) >= 20:
+                return df, True
+        except Exception:
+            pass
+    if df_1h_fallback is not None and not df_1h_fallback.empty:
+        return resample_ohlc(df_1h_fallback, "4h"), False
+    return pd.DataFrame(), False
+
+# [POPRAWKA KRYTYCZNA] NATYWNE ŚWIECE DZIENNE (1D)
+# Poprzednia wersja resamplowała 1D z zaledwie 12-14 dni danych 1h (Coinbase/
+# CoinGecko), co dawało 12-14 świec dziennych — kod wtedy "poddawał się" i
+# podstawiał EMA50(1D) = cena * 0.98 (arbitralna, zmyślona wartość!). Teraz
+# pobieramy natywne świece dzienne z Coinbase (granularity=86400, do 300 dni)
+# lub Binance (interval=1d, limit=300) — obie dają aż 300 dni historii, czyli
+# 6x więcej niż wymaga EMA50. Dodatkowo naprawia to RSI 1D i RSI 3D, które
+# wcześniej też cierpiały na te same zbyt krótkie okna.
+def get_candles_1d_native(token_info, fallback_df_4h=None, fallback_df_1h=None):
     if token_info.get("coinbase"):
         try:
             df = fetch_from_coinbase(token_info["coinbase"], granularity=86400)
-            if not df.empty and len(df) >= 14: return df
-        except Exception: pass
+            if not df.empty and len(df) >= 20:
+                return df, True
+        except Exception:
+            pass
     if token_info.get("binance_symbol"):
         try:
-            df = fetch_from_binance_spot(token_info["binance_symbol"], interval="1d", limit=60)
-            if not df.empty and len(df) >= 14: return df
-        except Exception: pass
-    return pd.DataFrame()
+            df = fetch_from_binance_klines(token_info["binance_symbol"], interval="1d", limit=300)
+            if not df.empty and len(df) >= 20:
+                return df, True
+        except Exception:
+            pass
+    if fallback_df_4h is not None and not fallback_df_4h.empty:
+        return resample_ohlc(fallback_df_4h, "1d"), False
+    if fallback_df_1h is not None and not fallback_df_1h.empty:
+        return resample_ohlc(fallback_df_1h, "1d"), False
+    return pd.DataFrame(), False
 
 def resample_ohlc(df_1h, rule):
     df = df_1h.copy()
@@ -328,7 +364,7 @@ def calc_macd(series, span1=12, span2=26, signal=9):
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     return float(macd_line.iloc[-1]), float(signal_line.iloc[-1]), float((macd_line - signal_line).iloc[-1])
 
-# [NOWOŚĆ] ADX / +DI / -DI — SIŁA TRENDU (niezależna od jego kierunku)
+# ADX / +DI / -DI — SIŁA TRENDU (niezależna od jego kierunku)
 def calc_adx(df, period=14):
     if len(df) < period + 2:
         return 20.0, "😴 Brak Trendu (Konsolidacja)"
@@ -358,7 +394,7 @@ def calc_adx(df, period=14):
         strength = "😴 Brak Trendu (Konsolidacja)"
     return round(adx_val, 1), strength
 
-# [NOWOŚĆ] WSTĘGI BOLLINGERA (20, 2 STD) — DRUGIE (obok VWAP) NARZĘDZIE DO ŁAPANIA PRZEGRZANIA
+# WSTĘGI BOLLINGERA (20, 2 STD) — DRUGIE (obok VWAP) NARZĘDZIE DO ŁAPANIA PRZEGRZANIA
 def calc_bollinger(series, period=20, num_std=2.0):
     if len(series) < period:
         p = float(series.iloc[-1]) if len(series) > 0 else 0.0
@@ -374,7 +410,7 @@ def calc_bollinger(series, period=20, num_std=2.0):
     percent_b = ((curr - l) / (u - l + 1e-9)) * 100
     return m, u, l, round(percent_b, 1)
 
-# [NOWOŚĆ] KORELACJA Z BTC (na zwrotach godzinowych, okno dopasowane do okna Siły Względnej)
+# KORELACJA Z BTC (na zwrotach godzinowych, okno dopasowane do okna Siły Względnej)
 def calc_btc_correlation(token_closes, btc_closes, window=72):
     try:
         min_len = min(len(token_closes), len(btc_closes))
@@ -442,7 +478,7 @@ def calc_rvol(df, period=20):
 def fetch_technical_analysis():
     data = []
     loaded_count = 0
-    fallback_tokens = []  # [NOWOŚĆ] śledzenie tokenów działających na danych zastępczych
+    fallback_tokens = []  # śledzenie tokenów działających na danych zastępczych
     fng_val, fng_class = get_fear_and_greed()
     btc_dom = get_global_market_data()
     alt_season = calculate_altcoin_season_index()
@@ -458,9 +494,24 @@ def fetch_technical_analysis():
             df_1h = get_candles_1h(item)
             if df_1h.empty or len(df_1h) < 5: raise ValueError("Brak świec")
 
-            df_4h = resample_ohlc(df_1h, "4h")
-            df_1d = resample_ohlc(df_1h, "1d") if len(df_1h) >= 24 else get_candles_1d(item)
-            df_3d = resample_ohlc(df_1h, "3d") if len(df_1h) >= 72 else df_1d
+            # [POPRAWKA KRYTYCZNA] Natywne 4H i 1D zamiast resamplingu z ~12 dni danych 1h.
+            df_4h, is_4h_native = get_candles_4h(item, df_1h_fallback=df_1h)
+            if df_4h.empty: raise ValueError("Brak świec 4H")
+
+            df_1d, is_1d_native = get_candles_1d_native(item, fallback_df_4h=df_4h, fallback_df_1h=df_1h)
+            if df_1d.empty: df_1d = df_4h
+
+            df_3d = resample_ohlc(df_1d, "3d") if len(df_1d) >= 6 else df_1d
+
+            # Flagi wiarygodności danych — decydują o pewności Reżimu MTF i wadze w Smart Score
+            ema200_reliable = is_4h_native and len(df_4h) >= 200
+            ema50_1d_reliable = is_1d_native and len(df_1d) >= 50
+            if ema200_reliable and ema50_1d_reliable:
+                data_confidence = "🟢 Pełne dane"
+            elif len(df_4h) >= 30 and len(df_1d) >= 15:
+                data_confidence = "🟡 Częściowe dane"
+            else:
+                data_confidence = "🔴 Ograniczone dane"
 
             price = float(df_1h["close"].iloc[-1])
             prev_price_24h = float(df_1h["close"].iloc[-24] if len(df_1h) >= 24 else df_1h["close"].iloc[0])
@@ -491,7 +542,7 @@ def fetch_technical_analysis():
             raw_drift = float(log_returns.mean()) if len(log_returns) > 5 else 0.0
             drift_1h = float(np.clip(raw_drift, -0.0003, 0.0003))
 
-            # [POPRAWKA 4] TRIADA RSI: 4H / 1D / 3D (teraz z wygładzaniem Wildera)
+            # [POPRAWKA 4] TRIADA RSI: 4H / 1D / 3D (Wilder + teraz solidna, długa historia)
             rsi_4h = calc_rsi(df_4h["close"]) if len(df_4h) >= 14 else 50.0
             rsi_1d = calc_rsi(df_1d["close"]) if len(df_1d) >= 14 else 50.0
             rsi_3d = calc_rsi(df_3d["close"]) if len(df_3d) >= 14 else rsi_1d
@@ -505,26 +556,30 @@ def fetch_technical_analysis():
             obv_status, obv_diff_pct, is_obv_accumulating = calc_smoothed_obv(df_4h)
             rvol_val = calc_rvol(df_4h)
 
-            # [NOWOŚĆ] ADX (SIŁA TRENDU) NA 4H
+            # ADX (SIŁA TRENDU) NA 4H
             adx_val, adx_strength = calc_adx(df_4h)
 
-            # [NOWOŚĆ] BOLLINGER BANDS NA 4H
+            # BOLLINGER BANDS NA 4H
             bb_mid, bb_upper, bb_lower, percent_b = calc_bollinger(df_4h["close"])
 
-            # [NOWOŚĆ] FUNDING RATE I OPEN INTEREST (BINANCE FUTURES)
+            # FUNDING RATE I OPEN INTEREST (BINANCE FUTURES)
             funding_rate, open_interest = get_funding_rate_and_oi(item.get("binance_symbol"))
 
             tr = pd.concat([df_4h["high"] - df_4h["low"], (df_4h["high"] - df_4h["close"].shift()).abs(), (df_4h["low"] - df_4h["close"].shift()).abs()], axis=1).max(axis=1) if len(df_4h) > 1 else pd.Series([price * 0.02])
             atr_series = tr.rolling(min(14, len(df_4h))).mean().dropna()
             atr = float(atr_series.iloc[-1]) if not atr_series.empty else price * 0.02
-            # [NOWOŚĆ] PERCENTYL OBECNEJ ZMIENNOŚCI (ATR) NA TLE DOSTĘPNEJ HISTORII
             if len(atr_series) >= 5:
                 atr_percentile = float((atr_series <= atr_series.iloc[-1]).mean() * 100)
             else:
                 atr_percentile = 50.0
 
-            ema200_4h = float(df_4h["close"].ewm(span=min(200, len(df_4h)), adjust=False).mean().iloc[-1]) if len(df_4h) > 0 else price
-            ema50_1d = float(df_1d["close"].ewm(span=min(50, len(df_1d)), adjust=False).mean().iloc[-1]) if len(df_1d) >= 50 else (price * 0.98)
+            # [POPRAWKA KRYTYCZNA] EMA200(4H) i EMA50(1D) liczone teraz na
+            # natywnych, długich seriach (patrz get_candles_4h/get_candles_1d_native).
+            # Usunięto fabrykowany fallback "price * 0.98" — jeśli danych wciąż
+            # brakuje, EMA i tak się policzy (span przycięty do len(df)), ale
+            # ema200_reliable/ema50_1d_reliable jawnie to sygnalizują dalej.
+            ema200_4h = float(df_4h["close"].ewm(span=min(200, max(len(df_4h), 2)), adjust=False).mean().iloc[-1]) if len(df_4h) > 0 else price
+            ema50_1d = float(df_1d["close"].ewm(span=min(50, max(len(df_1d), 2)), adjust=False).mean().iloc[-1]) if len(df_1d) > 0 else price
 
             sl = price - (2.5 * atr)
             support = float(df_4h["low"].min()) if len(df_4h) > 0 else price * 0.95
@@ -547,6 +602,11 @@ def fetch_technical_analysis():
                 regime = "🔴 Strukturalny Trend Spadkowy"
                 mtf_confluence = False
 
+            # Jawne oznaczenie niepełnych danych w samej etykiecie reżimu —
+            # zamiast cicho ufać wynikowi, użytkownik widzi że dane są niepełne.
+            if not (ema200_reliable and ema50_1d_reliable):
+                regime += " ⚠️"
+
             data.append({
                 "Lp.": loaded_count + 1,
                 "Token": symbol, "Cena ($)": fmt(price), "24h (%)": round(change_24h, 2),
@@ -554,6 +614,7 @@ def fetch_technical_analysis():
                 "EMA 200 (4H)": fmt(ema200_4h), "EMA 50 (1D)": fmt(ema50_1d),
                 "Siła vs BTC (72h)": rs_vs_btc_status,
                 "Wsparcie": fmt(support), "Opór": fmt(resistance), "SL (ATR)": fmt(sl), "R:R": f"1:{rr_val}",
+                "Pewność Danych": data_confidence,
 
                 # Zmienne do Zakładki 2
                 "RSI 4H": round(rsi_4h, 1), "RSI 1D": round(rsi_1d, 1), "RSI 3D": round(rsi_3d, 1),
@@ -581,22 +642,23 @@ def fetch_technical_analysis():
                 "PercentB_Raw": float(percent_b),
                 "Funding_Raw": funding_rate, "OpenInterest_Raw": open_interest,
                 "BTC_Corr_Raw": float(btc_corr),
+                "EMA200_Reliable_Raw": bool(ema200_reliable), "EMA50_1D_Reliable_Raw": bool(ema50_1d_reliable),
+                "Data_Confidence_Raw": data_confidence,
+                "Candles_4H_Count_Raw": int(len(df_4h)), "Candles_1D_Count_Raw": int(len(df_1d)),
             })
             loaded_count += 1
         except Exception:
             fallback_tokens.append(symbol)
-            # [NOWOŚĆ] Kolejność awaryjna: Binance (live) -> CoinGecko (cache) -> 1.0 domyślnie.
-            # To bezpośrednio adresuje przypadek JUP, który wcześniej mógł
-            # lądować na sztywnej wartości 1.0, gdy CoinGecko nie odpowiadało.
+            # Kolejność awaryjna: Binance (live) -> CoinGecko (cache) -> 1.0 domyślnie.
             p, chg = get_simple_binance_price(item.get("binance_symbol"))
             if p is None:
                 p, chg = get_simple_coingecko_price(gecko_id)
             data.append({
                 "Lp.": loaded_count + 1,
                 "Token": symbol, "Cena ($)": fmt(p), "24h (%)": round(chg, 2),
-                "Reżim Rynkowy": "Konsolidacja", "EMA 200 (4H)": fmt(p), "EMA 50 (1D)": fmt(p),
+                "Reżim Rynkowy": "Konsolidacja ⚠️", "EMA 200 (4H)": fmt(p), "EMA 50 (1D)": fmt(p),
                 "Siła vs BTC (72h)": "➡️ NEUTRALNY", "Wsparcie": fmt(p * 0.95), "Opór": fmt(p * 1.05),
-                "SL (ATR)": fmt(p * 0.95), "R:R": "1:1.5",
+                "SL (ATR)": fmt(p * 0.95), "R:R": "1:1.5", "Pewność Danych": "🔴 Ograniczone dane",
                 "RSI 4H": 50.0, "RSI 1D": 50.0, "RSI 3D": 50.0, "RVOL (4H)": "1.0x",
                 "VWAP 7D": fmt(p), "VWAP +2Std": fmt(p * 1.05), "OBV Status": "Neutralny (0.0%)",
                 "OBV Odchylenie (%)": 0.0, "MACD Hist (4H)": "0.0",
@@ -606,11 +668,14 @@ def fetch_technical_analysis():
                 "Resistance_Raw": p * 1.05, "RSI_4H_Raw": 50.0, "RSI_1D_Raw": 50.0, "RSI_3D_Raw": 50.0,
                 "RVOL_Raw": 1.0, "VWAP_Raw": p, "VWAP_Upper_Raw": p * 1.05, "Is_VWAP_Overextended": False,
                 "OBV_Raw": "Neutralny (0.0%)", "OBV_Diff_Pct": 0.0, "Is_OBV_Accumulating": False,
-                "Regime_Raw": "Konsolidacja", "MTF_Confluence": False, "Vol_Raw": 0.006, "Drift_Raw": 0.0,
+                "Regime_Raw": "Konsolidacja ⚠️", "MTF_Confluence": False, "Vol_Raw": 0.006, "Drift_Raw": 0.0,
                 "RS_BTC_Pct": 0.0, "ATR_Raw": p * 0.02, "ATR_Percentile_Raw": 50.0,
                 "ADX_Raw": 20.0, "ADX_Strength_Raw": "😴 Brak Trendu (Konsolidacja)",
                 "BB_Mid_Raw": p, "BB_Upper_Raw": p * 1.02, "BB_Lower_Raw": p * 0.98, "PercentB_Raw": 50.0,
                 "Funding_Raw": None, "OpenInterest_Raw": None, "BTC_Corr_Raw": 0.0,
+                "EMA200_Reliable_Raw": False, "EMA50_1D_Reliable_Raw": False,
+                "Data_Confidence_Raw": "🔴 Ograniczone dane",
+                "Candles_4H_Count_Raw": 0, "Candles_1D_Count_Raw": 0,
             })
             loaded_count += 1
 
@@ -643,11 +708,15 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
         rs_btc_pct = float(row.get("RS_BTC_Pct", 0.0))
         adx_val = float(row.get("ADX_Raw", 20.0))
         funding_rate = row.get("Funding_Raw", None)
+        mtf_data_reliable = bool(row.get("EMA200_Reliable_Raw", False)) and bool(row.get("EMA50_1D_Reliable_Raw", False))
 
         score = 50.0
 
-        # 1. Konfluencja MTF (4H + 1D)
-        if mtf_confluence: score += 25.0
+        # 1. Konfluencja MTF (4H + 1D) — [POPRAWKA] bonus zależny od pewności danych:
+        # pełny +25 tylko gdy EMA200(4H) i EMA50(1D) mają solidną, natywną historię;
+        # w przeciwnym razie połowiczny bonus, by nie ufać w 100% niepełnym danym.
+        if mtf_confluence:
+            score += 25.0 if mtf_data_reliable else 12.0
         elif "Wzrost 4H" in regime: score += 10.0
         elif "Spadkowy" in regime: score -= 20.0
 
@@ -671,13 +740,13 @@ def run_predictions(df_ta, btc_dom, min_score_filter, max_rsi_filter, req_accumu
 
         if rsi_3d > 75: score -= 10.0
 
-        # 5. [NOWOŚĆ] Siła Trendu (ADX) — potwierdza lub podważa konfluencję MTF
+        # 5. Siła Trendu (ADX) — potwierdza lub podważa konfluencję MTF
         if adx_val >= 25 and mtf_confluence:
             score += 8.0
         elif adx_val < 15:
             score -= 5.0
 
-        # 6. [NOWOŚĆ] Funding Rate — sentyment pozycjonowania (tylko gdy dostępny)
+        # 6. Funding Rate — sentyment pozycjonowania (tylko gdy dostępny)
         if funding_rate is not None:
             if funding_rate > 0.05:
                 score -= 5.0
@@ -877,7 +946,7 @@ def aktualizuj_i_rozlicz_pozycje(df_ta):
 
     df_hist.to_csv(HISTORY_FILE, index=False)
 
-# [NOWOŚĆ] HISTORYCZNA SKUTECZNOŚĆ SYGNAŁÓW DLA KONKRETNEGO TOKENA
+# HISTORYCZNA SKUTECZNOŚĆ SYGNAŁÓW DLA KONKRETNEGO TOKENA
 def analiza_historyczna_tokena(symbol):
     if not os.path.exists(HISTORY_FILE):
         return None
@@ -929,7 +998,6 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     resistance_str = row_ta.get("Opór", "0.00")
     sl_str = row_ta.get("SL (ATR)", "0.00")
 
-    # [NOWOŚĆ] dodatkowe surowe wskaźniki do raportu
     adx_val = float(row_ta.get("ADX_Raw", 20.0))
     adx_strength = row_ta.get("ADX_Strength_Raw", "-")
     bb_upper = float(row_ta.get("BB_Upper_Raw", price_raw * 1.02))
@@ -939,6 +1007,13 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     open_interest = row_ta.get("OpenInterest_Raw", None)
     btc_corr = float(row_ta.get("BTC_Corr_Raw", 0.0))
     atr_percentile = float(row_ta.get("ATR_Percentile_Raw", 50.0))
+
+    # Dane o wiarygodności EMA/MTF do transparentnego raportowania
+    data_confidence = row_ta.get("Data_Confidence_Raw", "🟡 Częściowe dane")
+    ema200_reliable = bool(row_ta.get("EMA200_Reliable_Raw", False))
+    ema50_1d_reliable = bool(row_ta.get("EMA50_1D_Reliable_Raw", False))
+    n_4h = int(row_ta.get("Candles_4H_Count_Raw", 0))
+    n_1d = int(row_ta.get("Candles_1D_Count_Raw", 0))
 
     edge_status = row_ml.get("Ocena Przewagi (Edge)", "-") if row_ml is not None else "-"
     smart_score = f"{float(row_ml.get('Smart Score (%)', 50.0)):.2f}" if row_ml is not None else "50.00"
@@ -950,6 +1025,13 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
 
     target_tp1 = price_raw * 1.06
 
+    # Opis wiarygodności danych EMA — na samej górze, bo warunkuje zaufanie do reszty raportu
+    conf_desc = f"**Pewność Danych MTF:** {data_confidence} (EMA200 4H: {n_4h} świec, EMA50 1D: {n_1d} świec). "
+    if ema200_reliable and ema50_1d_reliable:
+        conf_desc += "Obie średnie liczone są na natywnych, wystarczająco długich seriach — wynik reżimu rynkowego jest w pełni wiarygodny."
+    else:
+        conf_desc += "⚠️ Przynajmniej jedna ze średnich (EMA200 4H lub EMA50 1D) opiera się na krótszej niż optymalna historii świec — traktuj klasyfikację reżimu z ostrożnością, Smart Score uwzględnia to obniżonym bonusem za konfluencję."
+
     # Opisy sekcji
     pa_desc = f"Aktywo znajduje się w reżimie **{regime}**. Aktualny kurs wynosi `{fmt(price_raw)} $`. Średnia EMA200 4H przebiega na poziomie `{fmt(ema200_raw)} $`, natomiast wyższa średnia EMA50 1D znajduje się przy `{fmt(ema50_1d_raw)} $`. "
     if "Silny Trend" in regime:
@@ -959,7 +1041,6 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     else:
         pa_desc += "Cena pozostaje poniżej kluczowych średnich, co zwiększa ryzyko kontynuacji spadków lub trwałej konsolidacji."
 
-    # [NOWOŚĆ] Opis siły trendu ADX
     adx_desc = f"**ADX (4H):** `{adx_val}` — {adx_strength}. "
     if adx_val >= 25:
         adx_desc += "Wysoka wartość ADX potwierdza, że obecny kierunek (niezależnie od tego czy jest to trend wzrostowy czy spadkowy) jest strukturalnie silny, a nie przypadkowym szumem."
@@ -991,7 +1072,6 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     else:
         vwap_desc += "Cena utrzymuje się w bezpiecznym przedziale względem tygodniowego VWAP."
 
-    # [NOWOŚĆ] Opis Bollinger %B
     bb_desc = f"**Wstęgi Bollingera (20, 2σ, 4H):** Górna `{fmt(bb_upper)} $`, dolna `{fmt(bb_lower)} $`. Pozycja ceny w paśmie (%B): `{percent_b}%`. "
     if percent_b >= 95:
         bb_desc += "Cena przy górnej krawędzi wstęgi — niezależne od VWAP potwierdzenie przegrzania."
@@ -1006,7 +1086,6 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     elif rsi_4h > 65:
         rsi_desc += "Interwał 4H sygnalizuje silne wykupienie."
 
-    # [NOWOŚĆ] Opis zmienności (percentyl ATR)
     vol_desc = f"**Percentyl Zmienności (ATR 4H):** `{round(atr_percentile, 1)}%` na tle dostępnej historii świec. "
     if atr_percentile >= 80:
         vol_desc += "Zmienność jest obecnie bardzo podwyższona — ruchy cenowe (w obie strony) mogą być gwałtowniejsze niż zwykle, co zwiększa ryzyko szerokich wybić SL."
@@ -1015,7 +1094,6 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
     else:
         vol_desc += "Zmienność mieści się w typowym zakresie."
 
-    # [NOWOŚĆ] Opis Funding Rate / Open Interest
     if funding_rate is not None:
         funding_desc = f"**Funding Rate (Binance Futures):** `{funding_rate}%`. "
         if funding_rate > 0.05:
@@ -1027,7 +1105,7 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
         if open_interest is not None:
             funding_desc += f" Open Interest: `{fmt(open_interest)}` kontraktów."
     else:
-        funding_desc = "**Funding Rate:** Brak danych z rynku kontraktów wieczystych dla tego aktywa (token niedostępny na Binance Futures lub API nie odpowiedziało)."
+        funding_desc = "**Funding Rate:** Brak danych z rynku kontraktów wieczystych dla tego aktywa (token niedostępny na Binance Futures, region blokuje dostęp do API, lub serwis nie odpowiedział)."
 
     if "WYSOKI EDGE" in edge_status:
         final_reco = "🟢 **REKOMENDACJA:** Sygnał zakupu wysokiej jakości. Struktura MTF, siła trendu (ADX), odchylenie OBV oraz symulacja MC wskazują na wyraźną przewagę statystyczną."
@@ -1035,8 +1113,9 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
         final_reco = "🟡 **REKOMENDACJA:** Pozycja neutralna / Obserwacja. Brak pełnej konfluencji średnich, niedostateczna siła trendu (ADX) lub akumulacja na OBV."
     else:
         final_reco = "❌ **REKOMENDACJA:** Sygnał odrzucony. Ryzyko wynikające z braku trendu, przegrzania na VWAP/Bollingerze lub słabości względnej do BTC."
+    if not (ema200_reliable and ema50_1d_reliable):
+        final_reco += " ⚠️ Uwzględnij dodatkowo ograniczoną pewność danych EMA opisaną w sekcji 1."
 
-    # [NOWOŚĆ] Sekcja historycznej skuteczności tokena
     hist_stats = analiza_historyczna_tokena(symbol)
     if hist_stats is not None:
         hist_desc = (
@@ -1059,6 +1138,7 @@ def generuj_raport_ai(row_ta, row_ml=None, btc_dom=55.0):
 
 ---
 #### 1. 🧠 Analiza Strukturalna i Makroekonomiczna
+* {conf_desc}
 * **Struktura MTF (4H EMA200 & 1D EMA50):** {pa_desc}
 * **Siła Trendu (ADX):** {adx_desc}
 * **Dominacja BTC, Siła Względna i Korelacja (72h):** {btc_dom_desc}
@@ -1113,7 +1193,7 @@ with st.spinner("🔄 Pobieram dane na żywo z API i przeliczam wskaźniki..."):
     auto_zapisz_sygnaly(df_ml, df_ta)
     aktualizuj_i_rozlicz_pozycje(df_ta)
 
-# [NOWOŚĆ] Widoczność jakości danych w sidebarze (Punkt 4)
+# Widoczność jakości danych w sidebarze
 with st.sidebar:
     st.divider()
     st.subheader("🛰️ Jakość Danych")
@@ -1121,6 +1201,10 @@ with st.sidebar:
         st.warning(f"⚠️ {len(fallback_tokens)}/{total_c} tokenów działa na danych zastępczych (fallback): {', '.join(fallback_tokens)}")
     else:
         st.success("✅ Wszystkie tokeny załadowane z pełnych danych świecowych.")
+    if not df_ta.empty and "Pewność Danych" in df_ta.columns:
+        niepewne = df_ta[df_ta["Pewność Danych"] != "🟢 Pełne dane"]["Token"].tolist()
+        if niepewne:
+            st.info(f"ℹ️ EMA200/EMA50 z niepełną historią dla: {', '.join(niepewne)} — patrz kolumna 'Pewność Danych' w zakładce 1.")
 
 col_t, col_d1, col_d2, col_f = st.columns([2.0, 1, 1, 1])
 col_t.title("📊 Analiza Krypto MTF Pro")
@@ -1150,7 +1234,7 @@ if st.button("🔄 Odśwież dane", type="primary"):
     st.rerun()
 
 # RADYKALNE ROZDZIELENIE DANYCH W ZAKŁADKACH
-df_tab1_view = df_ta[["Lp.", "Token", "Cena ($)", "24h (%)", "Reżim Rynkowy", "EMA 200 (4H)", "EMA 50 (1D)", "Siła vs BTC (72h)", "Wsparcie", "Opór", "SL (ATR)", "R:R"]].copy()
+df_tab1_view = df_ta[["Lp.", "Token", "Cena ($)", "24h (%)", "Reżim Rynkowy", "Pewność Danych", "EMA 200 (4H)", "EMA 50 (1D)", "Siła vs BTC (72h)", "Wsparcie", "Opór", "SL (ATR)", "R:R"]].copy()
 
 if not df_ml.empty:
     df_tab2_view = df_ml[["Lp.", "Token", "Cena ($)", "Smart Score (%)", "Ocena Przewagi (Edge)", "RSI 4H", "RSI 1D", "RSI 3D", "ADX (4H)", "Siła Trendu", "RVOL (4H)", "VWAP 7D", "VWAP +2Std", "%B (Boll)", "OBV Odchylenie (%)", "Funding (%)", "Korelacja BTC (72h)", "Prognoza 10D", "Zasięg MC 10D (95%)", "Szansa Wzrostu (10D)"]].copy()
@@ -1184,6 +1268,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["1. 🏛️ Skaner Makro i Struktura", "
 
 with tab1:
     st.subheader("🏛️ Struktura Rynkowa i Konfluencja MTF")
+    st.caption("Kolumna 'Pewność Danych' pokazuje, czy EMA200(4H)/EMA50(1D) mają wystarczająco długą, natywną historię świec, by być w pełni wiarygodne.")
     st.dataframe(apply_high_contrast_striping(df_tab1_view), column_config=config_tabel_tab1, use_container_width=True, hide_index=True)
 
 with tab2:
